@@ -1,0 +1,716 @@
+---
+title: 'Ecological regression with NIMBLE in R: A case study examining the long term effect of NO$_2$ exposure on air-pollution'
+author: "Garyfallos Konstantinoudis"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+bibliography: biblio.bib
+---
+
+
+
+<style type="text/css">
+body{ /* Normal  */
+      font-size: 14px;
+  }
+h1.title {
+  font-size: 30px;
+  color: black;
+  font-weight: bold;
+}
+h1 { /* Header 1 */
+    font-size: 25px;
+  color: black;
+  font-weight: bold;
+}
+h2 { /* Header 2 */
+    font-size: 20px;
+  color: black;
+  font-weight: bold;
+}
+h3 { /* Header 3 */
+    font-size: 15px;
+  color: black;
+  font-weight: bold;
+}
+code.r{ /* Code block */
+    font-size: 14px;
+}
+pre, code {
+    color: 	#1B0F0E;
+  }
+</style>
+
+
+\pagenumbering{gobble} 
+\pagenumbering{arabic} 
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval = FALSE, fig.align = "center")
+```
+
+
+# Install and load packages 
+
+This practical requires the following packages to be installed and attached: `sf`, `dplyr`, `tidyverse`,  `nimble`, `coda`, `spdep`, `patchwork`, `fastDummier`, `ggmcmc`, `gplots` and `INLA`. 
+
+* To check where the packages are saved type `.libPaths()`
+
+* To check if already installed type `.packages(all.available = TRUE)`. As seen on the previous practical, you can type is.element("PACKAGE_NAME", `installed.packages()`) to check if the individual package "PACKAGE_NAME" is installed. 
+
+ If the packages are not installed you need to do it through:
+```{r eval=FALSE, echo=TRUE, message=FALSE, warning=FALSE}
+install.packages(c("sf","dplyr", "tidyverse", "nimble",  "coda", 
+                   "spdep", "patchwork", "fastDummies", "ggmcmc", "gplot", "kableExtra"), 
+                 type = "both",dependencies = TRUE, 
+                 repos = c(CRAN = "http://cran.r-project.org"))
+```
+
+* For `INLA`, you can use 
+```{r eval = FALSE,  results="hide"}
+install.packages("INLA",repos=c(getOption("repos"),
+                                INLA="https://inla.r-inla-download.org/R/stable"), dep=TRUE)
+```
+
+ Then you need to load these through:
+```{r eval=TRUE, echo=TRUE, message=FALSE, warning=FALSE}
+
+library(sf)           # Simple feature for R
+library(dplyr)        # A package for data manipulation
+library(tidyverse)    # A package for data manipulation and plotting
+
+
+library(nimble)       # A package for performing MCMC in R
+library(coda)         # A package for summarizing and plotting of MCMC output 
+                      # and diagnostic tests
+library(spdep)        # A package to calculate neighbors
+
+library(patchwork)    # A package to combine plots
+library(ggmcmc)       # MCMC diagnostics with ggplot
+library(INLA)         # A package for quick Bayesian inference (here used to calculate
+                      # the scale for BYM2)
+library(fastDummies)  # A package to create dummies from a factor
+library(gplots)       # A package to create CrI graphs
+
+library(kableExtra)   # package for formatting tables in rmarkdown
+
+```
+
+#  Introduction to the problem
+
+In this document we will perform ecological regression using `NIMBLE` [@nimble]. We will fit the BYM2 model [@riebler2016] and examine the effect of long term exposure to air-pollution on COVID-19 mortality in England. Long-term exposure to air-pollution has been hypothesised to worsen COVID-19 prognosis: either directly, as it can suppress early immune responses to the infection, or indirectly, as it can increase the risk of stroke, hypertension and other pre-existing conditions [@konstantinoudis2020]. We will use data openly available on COVID-19 mortality that can be downloaded from
+[ONS](https://www.ons.gov.uk/peoplepopulationandcommunity/healthandsocialcare/conditionsanddiseases). This data covers England during March and July 2020. Long term exposure to air-pollution was determined as the averaged NO$_2$ concentration during 2014-2018 as retrieved from [PCM model](https://uk-air.defra.gov.uk/research/air-quality-modelling?view=modelling). We will consider total number of intensive care unit (ICU) beds as of Ferbuary 2020 [NHS](https://www.england.nhs.uk/statistics/statistical-work-areas/bed-availability-and-occupancy/bed-data-overnight/) and socio-economic deprivation in 2019 ([IMD](https://www.gov.uk/government/statistics/english-indices-of-deprivation-2019)) as potential confounders. The data has been cleaned and stored in a `.shp` format.
+
+#  Import and prepare the data
+
+## In the git folder you will find the following files:
+
+* *COVIDecoregression.prj*, *COVIDecoregression.dbf*, *COVIDecoregression.shp* and *COVIDecoregression.shx*: This is a spatial polygon data frame containing information about: the lower tier local authorities (LTLA) in 2018 in England, the number of COVID-19 deaths (deaths), the expected number of deaths (expectd), the total ICU beds per population (TtlICU), the average concentration of NO2 during 2014-2018 in $\mu g/m^3$ (NO2) and the deprivation index (IMD).
+
+
+## Read data
+
+1. Import COVID-19 deaths. Note that the file is a shp, so we will use the `read_sf()` function! 
+```{r eval=TRUE, echo=TRUE, message=FALSE, warning=FALSE}
+COVID19eco <- read_sf("COVIDecoregression.shp") 
+```
+
+
+2. Print the first few rows.
+```{r eval=TRUE, echo=TRUE}
+head(COVID19eco)
+```
+
+
+## Creating the adjacency matrix
+
+1. Plot the shapefile. 
+```{r eval=TRUE, echo=TRUE, message=FALSE, warning=FALSE, out.width="70%"}
+par(mar = c(0,0,0,0))
+plot(COVID19eco$geometry)
+```
+
+2. Adjacency matrix in R
+```{r eval=TRUE, echo=TRUE, message=FALSE, warning=FALSE}
+LTLA_nb <- poly2nb(COVID19eco)
+summary(LTLA_nb)
+
+# convert in the format NIMBLE wants
+nbWB_B <- nb2WB(LTLA_nb)
+names(nbWB_B)  
+summary(nbWB_B)
+```
+
+## Creating the dummy variables
+
+The variable IMD is a categorical one. To make it compatible with the NIBLE format required for categorical variables we will use the function `dummy_cols` in the `fastDummies` package.
+
+```{r eval=TRUE}
+fastDummies::dummy_cols(COVID19eco$IMD) %>% as_tibble() %>% 
+  select(.data_1:.data_5) %>% 
+  rename(IMD_1 = .data_1, IMD_2 = .data_2, IMD_3 = .data_3, 
+         IMD_4 = .data_4, IMD_5 = .data_5) -> dummies
+                                            
+COVID19eco <- cbind(COVID19eco, dummies)
+```
+
+#  Exploratory analysis
+
+## Summary of the shapefile
+```{r eval=TRUE, echo=TRUE}
+summary(COVID19eco)
+```
+
+## Boxplots of the variables
+```{r eval=TRUE, echo=TRUE}
+ggplot() + geom_boxplot(data = COVID19eco, aes(y = deaths)) + 
+  theme_bw() + ylab("") + ggtitle("Deaths") -> p1
+
+ggplot() + geom_boxplot(data = COVID19eco, aes(y = expectd)) + 
+  theme_bw() + ylab("") + ggtitle("Expected") -> p2
+
+ggplot() + geom_boxplot(data = COVID19eco, aes(y = TtlICUB)) + 
+  theme_bw() + ylab("") + ggtitle("ICU beds") -> p3
+
+ggplot() + geom_boxplot(data = COVID19eco, aes(y = NO2)) + 
+  theme_bw() + ylab("") + ggtitle(expression(NO[2])) -> p4
+
+ggplot() + geom_boxplot(data = COVID19eco, aes(y = IMD)) + 
+  theme_bw() + ylab("") + ggtitle("IMD") -> p5
+
+(p1|p2)/(p3|p4|p5)
+```
+
+## Maps of the variables
+```{r eval=TRUE, echo=TRUE}
+ggplot() + geom_sf(data = COVID19eco, aes(fill = deaths), col = NA) + 
+  theme_bw() + ggtitle("Deaths") + scale_fill_viridis_c() -> p1
+
+ggplot() + geom_sf(data = COVID19eco, aes(fill = expectd), col = NA) + 
+  theme_bw() + ggtitle("Expected") + scale_fill_viridis_c() -> p2
+
+ggplot() + geom_sf(data = COVID19eco, aes(fill = TtlICUB), col = NA) + 
+  theme_bw() + ggtitle("ICU beds") + scale_fill_viridis_c() -> p3
+
+ggplot() + geom_sf(data = COVID19eco, aes(fill = NO2), col = NA) + 
+  theme_bw() + ggtitle(expression(NO[2])) + scale_fill_viridis_c() -> p4
+
+ggplot() + geom_sf(data = COVID19eco, aes(fill = IMD), col = NA) + 
+  theme_bw() + ggtitle("IMD") + scale_fill_viridis_c() -> p5
+
+(p1|p2)/(p3|p4|p5)
+```
+
+## Correlation between ICU beds and NO2
+```{r eval=TRUE, echo=TRUE, out.width="70%"}
+ggplot() + geom_point(data = COVID19eco, aes(x = NO2, y = TtlICUB)) + 
+  theme_bw() + annotate("text", x = 10, y = 0.17, size = 6,
+                        label = paste0("cor = ", round(cor(COVID19eco$NO2,
+                                                           COVID19eco$TtlICUB), 
+                                                       digits = 2))) -> p1
+
+p1
+```
+
+## Boxplot and map of the crude SMR (standardized mortality ratio)
+```{r eval=TRUE, echo=TRUE}
+
+COVID19eco$crudeSMR <- COVID19eco$deaths/COVID19eco$expectd
+
+ggplot() + geom_boxplot(data = COVID19eco, aes(y = crudeSMR)) + 
+  theme_bw() + ggtitle("") + ylab("") -> p1
+
+ggplot() + geom_sf(data = COVID19eco, aes(fill = crudeSMR), col = NA) + 
+  theme_bw() + ggtitle("") + scale_fill_viridis_c() -> p2
+
+(p1|p2) + plot_annotation(title = "Crude SMR")
+```
+
+#  Ecological regression analysis
+
+## Model specification
+
+We will fit a Poisson log-linear model in the Bayesian framework to quantify the effect of NO$_2$, while adjusting for ICU beds and deprivation. To model the spatial autocorrelation we will use the BYM2 prior [@riebler2016], which is an attractive extension of the BYM model [@besag1991]. Let $i=1,...N$ be the index for the LTLAs in England, $Y_i$ be the number of COVID-19 deaths, $E_i$ the expected number of COVID-19 death, $X_1$ the NO$_2$ concentration, $X_2$ the number of ICU beds per population, and $X_{3ji}$ the dummy variables for deprivation with $j=2,...,5$:
+
+\begin{equation}
+\begin{aligned}
+\hbox{O}_i & \sim \hbox{Poisson}(E_i \lambda_i); \;\;\; i=1,...,N\\
+\log \lambda_i & = \alpha + \beta_1 X_{1i} + \beta_2 X_{2i} + \sum_{j=2}^5\beta_{3j} X_{3ji} + b_{i}  \\
+b_{i} & = \frac{1}{\tau_b}\big(\theta\sqrt{1-\rho} + \phi\sqrt{\rho}\big)\\
+\theta_{i} & \sim N(0,1/\tau_{\theta}) \\
+\phi_{i} & \sim \text{ICAR}({\bf W^*}, 1)\\
+\end{aligned}
+\end{equation}
+
+where $\alpha$ is an intercept term, $\mathbf{\beta}$ a vector of coefficients, $\theta$ the spatially unstructured random effect, $\phi$ the scaled spatially structured random effect, $\rho$ a mixing parameter, $tau_b$ the precision of the field, $tau_{\theta}$ the precision of the unstrucutred random effect and {\bf W^*} a scaled adjacency matrix.
+
+1. Write the model
+```{r echo=TRUE, eval=TRUE}
+BYMecoCode <- nimbleCode(
+{
+  for (i in 1:N){
+    
+    O[i] ~ dpois(mu[i])                                       # Poisson likelihood 
+    log(mu[i]) <- log(E[i]) + inprod(beta[], X[i,]) + b[i]
+    
+    # of course you can write this explicitly too:
+    # log(mu[i]) <- log(E[i]) + alpha + b[i] +
+    #               beta1*X1[i] + beta2*X2[i] + 
+    #               beta32*X32[i] + beta33*X33[i] + 
+    # beta34*X34[i] + beta35*X35[i]
+                             
+    b[i] <- (1/sqrt(tau.b))*(sqrt((1-rho))*theta[i] + 
+                               sqrt(rho/scale)*phi[i])
+    
+    theta[i] ~ dnorm(0, tau = tau.theta)                      # area-specific RE
+    SMR[i] <- exp(b[1] + b[i])                                # area-specific SIR
+    resSMR[i] <- exp(b[i])                                    # area-specific residual SIR
+    e[i] <- (O[i]-mu[i])/sqrt(mu[i])                          # residuals  
+    proba.resSMR[i]<-step(resSMR[i]-1)                        # Posterior probability
+  } 
+  
+  # ICAR prior
+  phi[1:N] ~ dcar_normal(adj[1:L], weights[1:L], 
+                         num[1:N], tau = 1, zero_mean = 1)    # its scaled so tau = 1
+  
+  # Priors
+  beta[1] ~ dflat()                                           # vague prior (Unif(-inf, +inf)) 
+  overallRR <- exp(beta[1])
+
+  # precision parameter of the reparametrisation
+  tau.b ~ dgamma(1, 0.01)                                     # prior for the precision of b
+  sigma2.b <- 1/tau.b                                         # the variance of b
+                           
+  # precision parameter of theta                         
+  tau.theta ~ dgamma(1, 0.01)                                 # prior for the precision of theta
+  sigma2.theta <- 1/tau.theta                                 # the variance of theta
+                           
+  # mixing parameter                         
+  rho ~ dbeta(1, 1)                                           # prior for the mixing parameter
+  
+  # priors for the fixed effects
+  for(j in 1:(K-1)){
+	    beta[j+1] ~ dnorm(0, tau = 1)
+      RR.beta[j] <- exp(beta[j+1])
+  }
+  
+  RR.beta1_5NO2 <- exp(beta[2] * 5)                           # this will be explained later
+}
+
+)
+```
+
+2. Calculate the scaling factor
+```{r eval=TRUE}
+W.scale <- nb2mat(LTLA_nb, zero.policy = TRUE, style = "B")           
+W.scale <- -W.scale
+diag(W.scale) <- abs(apply(W.scale, 1, sum))
+# solve(W.scale) # this should not work since by definition the matrix is singular
+
+Q = inla.scale.model(W.scale, constr=list(A=matrix(1, nrow=1, ncol=nrow(W.scale)), e=0))
+scale = exp((1/nrow(W.scale))*sum(log(1/diag(Q))))
+```	
+
+
+3. Format the data. Don't forget to include the covariates and the adjacency matrix:
+```{r echo= TRUE, eval = TRUE}
+
+n.LTLA <- dim(COVID19eco)[1]
+
+# Format the data for NIMBLE in a list
+COVIDdata = list(
+                 O = COVID19eco$deaths,                        # observed nb of deaths
+                 
+                 # covariates
+                 X = cbind(1,                                  # for the intercept
+                           COVID19eco$NO2,                     # NO2
+                           scale(COVID19eco$TtlICUB)[,1],      # ICU beds
+                           COVID19eco$IMD_2,                   # IMD 2
+                           COVID19eco$IMD_3,                   # IMD 3
+                           COVID19eco$IMD_4,                   # IMD 4
+                           COVID19eco$IMD_5)                   # IMD 5                        
+                                  
+
+)      
+      
+COVIDConsts <-list(      
+                 N = n.LTLA,                                   # nb of LTLAs
+                 
+                 # adjacency matrix
+                 L = length(nbWB_B$weights),                   # the number of neighboring areas
+                 E = COVID19eco$expectd,                       # expected number of deaths
+                 adj = nbWB_B$adj,                             # the elements of the neigh. matrix
+                 num = nbWB_B$num,
+                 weights = nbWB_B$weights, 
+                 
+                 scale = scale,                                # the scale for the covariance
+                 K = 7                                         # the total number of covariates 
+)
+
+```
+
+
+4. Create the initial values for ALL the unknown parameters. As usual, create two different chains.
+```{r echo=TRUE, eval=TRUE}
+inits <- list(
+  list(
+  # first chain 
+  tau.theta = 1, 
+  tau.b = 1,
+  theta = rep(0.01, times = n.LTLA),
+  phi = rep(0.01, times = n.LTLA), 
+  rho = 0.6,
+  beta = rep(0, 7)
+),
+#chain 2 
+  list(
+  tau.theta = 3,      
+  tau.b = 3,      
+  theta = rep(0.1, times = n.LTLA),
+  phi = rep(0.1, times = n.LTLA), 
+  rho = 0.9,
+  beta = c(-2,-2, rep(1, 5))
+  )
+)
+```
+
+
+5. Specify the parameters to monitor 
+```{r echo=TRUE, eval=TRUE}
+parameters = c("resSMR", "proba.resSMR", "sigma2.theta", "SMR", "RR.beta[1]",
+                 "RR.beta[2]", "RR.beta[3]", "RR.beta[4]", "RR.beta[5]", "RR.beta[6]",
+                  "overallRR", "sigma2.b", "mu", "rho", "RR.beta1_5NO2")
+```
+
+
+6. Specify the MCMC setting. 
+```{r echo=TRUE, eval=TRUE}
+ni <- 4000000  # nb iterations 
+nt <- 200      # thinning interval
+nb <- 2000000  # nb iterations as burn-in 
+nc <- 2       # nb chains
+
+# the above setting is a bit extreme, but as you will see later on the mixing of the coefficient of NO2 is not good. The results shown in this practical is for the above setting. For quick results select the following setting:
+
+ni <- 10000  # nb iterations 
+nt <- 5      # thinning interval
+nb <- 5000  # nb iterations as burn-in 
+nc <- 2       # nb chains
+```
+
+
+7. Run the MCMC simulations calling `nimbleMCMC`:
+```{r echo=TRUE, eval=FALSE, message=FALSE, warning=FALSE}
+t0<- Sys.time()
+modelBYM.eco <- nimbleMCMC(code = BYMecoCode,
+                      data = COVIDdata,
+                      constants = COVIDConsts, 
+                      inits = inits,
+                      monitors = parameters,
+                      niter = ni,
+                      nburnin = nb,
+                      thin = nt, 
+                      nchains = nc, 
+                      setSeed = 9, 
+                      progressBar = TRUE, 
+                      samplesAsCodaMCMC = TRUE, 
+                      summary = TRUE, 
+                      WAIC = TRUE
+                      )
+t1<- Sys.time()
+t1 - t0
+```
+
+```{r echo=FALSE, eval = TRUE}
+# saveRDS(modelBYM.eco, file = "modelBYM.eco")
+modelBYM.eco <- readRDS("modelBYM.eco")
+```
+
+## MCMC diagnostics
+
+1. Gelman-Rubin
+```{r echo=TRUE, eval=TRUE}
+GR.diag <- gelman.diag(modelBYM.eco$samples, multivariate = FALSE)
+all(GR.diag$psrf[,"Point est."] < 1.1) 
+which(GR.diag$psrf[,"Point est."] > 1.1) 
+```
+
+2. Traceplots for the regression coefficients
+```{r echo=TRUE, eval=TRUE, fig.height=10}
+ggs_BYMeco <- ggs(modelBYM.eco$samples) 
+
+ggs_BYMeco %>% filter(Parameter %in% c("RR.beta[1]",
+                 "RR.beta[2]", "RR.beta[3]", "RR.beta[4]", 
+                 "RR.beta[5]", "RR.beta[6]")) %>% 
+  ggs_traceplot() + theme_bw()
+
+
+```
+
+3. Running means for the regression coefficients:
+```{r echo=TRUE, eval=TRUE, fig.height=8}
+ggs_BYMeco %>% filter(Parameter %in% c("RR.beta[1]",
+                 "RR.beta[2]", "RR.beta[3]", "RR.beta[4]", 
+                 "RR.beta[5]", "RR.beta[6]")) %>% 
+  ggs_running() + theme_bw()
+```
+
+## Results
+
+1. Print summary statistics for the regression coefficients on the exp scale:
+```{r echo = TRUE, eval=FALSE}
+modelBYM.eco$summary$all.chains[c("RR.beta[1]",
+                 "RR.beta[2]", "RR.beta[3]", "RR.beta[4]", 
+                 "RR.beta[5]", "RR.beta[6]"),]
+```
+
+2. Check also the density of the posteriors of the regression coefficients on the exp scale:
+```{r echo=TRUE, eval=TRUE, fig.height=10}
+
+ggs_BYMeco %>% filter(Parameter %in% c("RR.beta[1]",
+                 "RR.beta[2]", "RR.beta[3]", "RR.beta[4]", 
+                 "RR.beta[5]", "RR.beta[6]")) %>% 
+  ggs_compare_partial() + theme_bw()
+
+```
+
+3. Plot the residual SMR together with exceedance
+```{r eval=TRUE, echo=TRUE, fig.width=12}
+
+COVID19eco$resRR <- 
+  modelBYM.eco$summary$all.chains[paste0("resSMR[", 1:n.LTLA, "]"), "Mean"]
+
+COVID19eco$PostProb <- 
+  modelBYM.eco$summary$all.chains[paste0("proba.resSMR[", 1:n.LTLA, "]"), "Mean"]
+
+ggplot() + geom_sf(data = COVID19eco, aes(fill=resRR), col = NA) + ggtitle("Residual SMR") + 
+           scale_fill_viridis_c() + theme_bw() -> p1
+
+ggplot() + geom_sf(data = COVID19eco, aes(fill=PostProb), col = NA) + ggtitle("Pr(resSMR>1)") + 
+           scale_fill_viridis_c() + theme_bw() -> p2
+p1|p2
+
+``` 
+
+
+## Interpretation
+
+1. Extract the results in a nice table:
+```{r eval = TRUE}
+
+tab <- 
+round(
+modelBYM.eco$summary$all.chains[c("RR.beta[1]",
+                 "RR.beta[2]", "RR.beta[3]", "RR.beta[4]", 
+                 "RR.beta[5]", "RR.beta[6]", "sigma2.theta", 
+                 "sigma2.b", "rho"), c("Median", "95%CI_low", "95%CI_upp")], 
+digits = 2
+)
+
+rownames(tab) <- c("NO$_2$", "ICUBeds", "IMD2", "IMD3", "IMD4", "IMD5", 
+                   "$\\sigma^2_{\\phi}$", "$\\sigma^2_{b}$", "$\\rho$")
+
+knitr::kable(tab, caption = "Median and 95%CrI for the covariate coefficients and hyperparameters of the models.") %>%  kable_styling(bootstrap_options = "striped", full_width = F, position = "center")
+
+```
+
+Based on the table above, we see that for every unit increase in the long term exposure to NO$_2$, the COVID-19 mortality increases by `r tab["NO$_2$", "Median"] - 1`% (95% CrI: `r tab["NO$_2$", "95%CI_low"] - 1`% to `r tab["NO$_2$", "95%CI_upp"] - 1`%). Number of ICU beds per population seems to be protective, ie the more the beds in one particular LTLA the less likely is someone living in this LTLA to die from COVID-19: for every 1sd increase in the number of beds per population (it is sd because we `scale` the ICU beds before we put them in the model, in addition 1sd = 2 beds per 100 people). To quantify this, for every 2 beds per 100 people more, there is a `r tab["ICUBeds", "Median"] - 1`% (95% CrI: `r tab["ICUBeds", "95%CI_low"] - 1`% to `r tab["ICUBeds", "95%CI_upp"] - 1`%) decrease in the COVID-19 mortality. The only level of IMD that seems to be associated with COVID-19 mortality is the 5-th: the COVID19 mortality rate for people living in the least deprived areas is `r tab["IMD5", "Median"]` (95%CrI: `r tab["IMD5", "95%CI_low"]` to `r tab["IMD5", "95%CI_upp"]`) times the one for people living the the most deprived areas.  
+
+With respect to the hyperparameters, we see that the unstructured spatial term has very low variance, thus we could consider exclude it from the model. The mixing parameter is `r tab["$\\rho$", "Median"]`, and although the uncertainty is high, we see that `r tab["$\\rho$", "Median"]*100`% of the total variation captured is attributed to the spatially structured term. 
+
+2. Alternative interpretation:
+
+It would be of interest for some, to get the effect of air pollution to COVID-19 mortality for every $k$ units of increase in NO$_2$. That could be the case when we want results directly comparable with a specific analysis in the literature. To do so we add this line in the model: `RR.beta2_kNO2 <- exp(beta[3] * k)` and we remember to add it in the parameters to be monitored. To show this explicitly, say we want to find the effect for an increase of 5$\mu g/m^3$ in the long term exposure to NO$_2$. We then add `RR.beta1_5NO2 <- exp(beta[3] * 5)` this in the model and monitor it:
+
+```{r eval = TRUE}
+round(
+modelBYM.eco$summary$all.chains[c("RR.beta1_5NO2"), c("Median", "95%CI_low", "95%CI_upp")], 
+digits = 2
+)
+```
+
+
+## More flexible NO2 fits
+
+We will finish this tutorial by saying that the modeling approach we selected for far to model the effect of NO$_2$ on COVID-19 related mortality is a bit restrictive, since we assumed that such an effect is linear. To relax this assumption we could consider several different things. In this tutorial, we will make the continuous variable NO$_2$ categorical and we will see how valid it the assumption of linearity. Although this approach have some advantages, ie it straight-forward to do and the effect of some categories is easier to communicate plus is might be of interest in a particular application, there are other ways of allowing flexible fits (without categorizing), such as Gaussian processes and/or splines. This is the focus of another tutorial. 
+
+1. Select the categories for NO$_2$. Lets use quintiles!
+```{r eval=TRUE, echo=TRUE}
+COVID19eco$NO2_quintiles <- cut(COVID19eco$NO2, 
+                                breaks = quantile(COVID19eco$NO2, 
+                                                  probs = seq(from = 0, to = 1, length.out = 6)), 
+                                labels = 1:5, include.lowest = T)
+```
+
+
+2. Create the dummy variable as we did for the IMD
+```{r eval = TRUE}
+fastDummies::dummy_cols(COVID19eco$NO2_quintiles)  %>% 
+  select(.data_1:.data_5) %>% 
+  rename(NO2_1 = .data_1, NO2_2 = .data_2, NO2_3 = .data_3, NO2_4 = .data_4, NO2_5 = .data_5) -> 
+  dummies
+                                            
+COVID19eco <- cbind(COVID19eco, dummies)
+```
+
+3. Modify the data
+```{r eval = TRUE}
+# Format the data for NIMBLE in a list
+COVIDdata = list(
+                 O = COVID19eco$deaths,                     # observed nb of deaths
+                 
+                 # covariates
+                 X = cbind(1,                               # for the intercept
+                           COVID19eco$NO2_2,                # NO2 2
+                           COVID19eco$NO2_3,                # NO2 3
+                           COVID19eco$NO2_4,                # NO2 4
+                           COVID19eco$NO2_5,                # NO2 5
+                           scale(COVID19eco$TtlICUB)[,1],   # ICU beds
+                           COVID19eco$IMD_2,                # IMD 2
+                           COVID19eco$IMD_3,                # IMD 3
+                           COVID19eco$IMD_4,                # IMD 4
+                           COVID19eco$IMD_5)                # IMD 5                        
+                                  
+
+)      
+      
+COVIDConsts <-list(      
+                 N = n.LTLA,                                # nb of LTLAs
+                 
+                 # adjacency matrix
+                 L = length(nbWB_B$weights),                # the number of neighboring areas
+                 E = COVID19eco$expectd,                    # expected number of deaths
+                 adj = nbWB_B$adj,                          # the elements of the neigh. matrix
+                 num = nbWB_B$num,
+                 weights = nbWB_B$weights, 
+                 
+                 scale = scale,                             # the scale for the covariance matrix
+                 K = 10                                     # the total number of covariates
+)
+
+```
+
+4. Create the initial values for ALL the unknown parameters. As usual, create two different chains.
+```{r echo=TRUE, eval=TRUE}
+inits <- list(
+  list(
+  # first chain 
+  tau.theta = 1, 
+  tau.b = 1,
+  theta = rep(0.01, times = n.LTLA),
+  phi = rep(0.01, times = n.LTLA), 
+  rho = 0.5,
+  beta = rep(0, 10)
+),
+#chain 2 (different values from chain 1)
+  list(
+  tau.theta = 5,      
+  tau.b = 5,      
+  theta = rep(0.1, times = n.LTLA),
+  phi = rep(0.1, times = n.LTLA), 
+  rho = 0.8,
+  beta = c(rep(-2, 5), rep(1, 5))
+  )
+)
+```
+
+4. Specify the parameters to monitor (lets monitor only the covariates now)
+```{r echo=TRUE, eval=TRUE}
+parameters = paste0("RR.beta[", 1:9, "]")
+```
+
+
+
+5. Run the model
+```{r echo=TRUE, eval=FALSE, message=FALSE, warning=FALSE}
+t0<- Sys.time()
+modelBYM.eco_q <- nimbleMCMC(code = BYMecoCode,
+                      data = COVIDdata,
+                      constants = COVIDConsts, 
+                      inits = inits,
+                      monitors = parameters,
+                      niter = ni,
+                      nburnin = nb,
+                      thin = nt, 
+                      nchains = nc, 
+                      setSeed = 9, 
+                      progressBar = FALSE, 
+                      samplesAsCodaMCMC = TRUE, 
+                      summary = TRUE
+                      )
+t1<- Sys.time()
+t1 - t0
+```
+
+
+```{r echo=TRUE, eval = TRUE}
+# saveRDS(modelBYM.eco_q, file = "modelBYM.eco_q")
+modelBYM.eco_q <- readRDS("modelBYM.eco_q")
+```
+
+
+6. Check convergence of NO2
+```{r echo=TRUE, eval=TRUE, fig.height=6.5}
+ggs(modelBYM.eco_q$samples) %>% filter(Parameter %in% paste0("RR.beta[", 1:4, "]")) %>% 
+                       ggs_traceplot() + theme_bw()
+```
+
+7. Extract results
+
+```{r echo=TRUE, eval=TRUE}
+
+rbind(
+  c(1, NA, NA), 
+  round(
+modelBYM.eco_q$summary$all.chains[paste0("RR.beta[", 1:4, "]"), 
+                                  c("Median", "95%CI_low", "95%CI_upp")], 
+digits = 2
+ )
+) -> tab
+
+rownames(tab) <- levels(cut(COVID19eco$NO2, 
+                            breaks = quantile(COVID19eco$NO2, 
+                                              probs = seq(from = 0, to = 1, length.out = 6)), 
+                            include.lowest = T))
+
+options(knitr.kable.NA = "-")
+knitr::kable(tab, 
+             caption = "Median and 95%CrI for the NO$_2$ coefficients based on quintiles.") %>% 
+  kable_styling(bootstrap_options = "striped", full_width = F, position = "center")
+
+```
+
+```{r echo=TRUE, eval=TRUE, out.width="70%"}
+
+plotCI(y = tab[,1], 
+       x = seq(from = 1, to = 3, length.out = 5), 
+       ui = tab[,3], 
+       li = tab[,2], 
+       ylim = c(.5, 2), xlim = c(0.4, 3.5), 
+       lwd = 2, type = "p", pch = 15, cex = 1,  las = 1, 
+       ylab = "", main = "", xaxt = "n", xlab = "", cex.axis = 1, bty = "n"
+)
+
+axis(side = 1, at = seq(from = 1, to = 3, length.out = 5), 
+     labels = levels(cut(COVID19eco$NO2, 
+                         breaks = quantile(COVID19eco$NO2, 
+                                           probs = seq(from = 0, to = 1, length.out = 6)), 
+                         include.lowest = T)), 
+     cex.axis = .8, las = 2)
+grid()
+abline(h = 1, col = "red", lty = "dashed", lwd = 1.5)
+mtext(expression(bold("NO"[2])), side = 3, cex = 1.1, line = 0, font = 2)
+mtext("Posterior Relative Risk", side = 2, cex = 1.1, line = 3,font = 1)
+       
+```
+
+The linearity assumption looks reasonable.
+
+# Conclusion
+
+In this practical we saw an example of ecological regression with NIMBLE. We found a positive association between long term averaged NO$_2$ exposure and COVID-19 mortality after adjusting for total number of ICU beds per population and deprivation. The interpretation of the results are conditional on the convergence of the coefficients, and for some of them it seems that we should have put more effort and tune the MCMC setting in a better way to achieve convergence (for instance there seems to be insufficient mixing for the linear NO$_2$ coefficient).
+
+# References

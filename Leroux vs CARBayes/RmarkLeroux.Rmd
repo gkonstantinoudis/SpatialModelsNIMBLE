@@ -1,0 +1,537 @@
+---
+title: "Leroux models in NIMBLE and CARBayes: An example with the Scottish lip cancer data"
+author: "Garyfallos Konstantinoudis"
+header-includes:
+    - \usepackage{bm}
+output:
+  html_document:
+    toc: true
+    toc_float: true
+bibliography: biblio.bib
+---
+
+
+<style type="text/css">
+body{ /* Normal  */
+      font-size: 14px;
+  }
+h1.title {
+  font-size: 30px;
+  color: black;
+  font-weight: bold;
+}
+h1 { /* Header 1 */
+    font-size: 25px;
+  color: black;
+  font-weight: bold;
+}
+h2 { /* Header 2 */
+    font-size: 20px;
+  color: black;
+  font-weight: bold;
+}
+h3 { /* Header 3 */
+    font-size: 15px;
+  color: black;
+  font-weight: bold;
+}
+code.r{ /* Code block */
+    font-size: 14px;
+}
+pre, code {
+    color: 	#1B0F0E;
+  }
+</style>
+
+
+\pagenumbering{gobble} 
+\pagenumbering{arabic} 
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE, fig.align = "center")
+```
+
+In this document we will perform disease mapping and spatial regression using `NIMBLE` [@nimble] and [CARBayes](https://cran.r-project.org/web/packages/CARBayes/vignettes/CARBayes.pdf). We will fit the Leroux prior [@leroux2000] in the famous Scottish lip cancer dataset and compare the performance of the different softwares. 
+
+
+# Install and load packages 
+
+This practical requires the following packages to be installed and attached: `sf`, `dplyr`, `tidyverse`,  `nimble`, `coda`, `spdep`, `patchwork`, `GGally`, `ggmcmc`, `CARBayesdata` and `CARBayes`. 
+
+* To install the entire suite of packages, we can use:
+```{r eval = FALSE,  results="hide"}
+install.packages(c("sf", "dplyr", "tidyverse", "nimble", "coda", "spdep", "patchwork", 
+                   "GGally", "ggmcmc", "CARBayesdata", "CARBayes"), dependencies = TRUE, repos = "http://cran.r-project.org")
+```
+
+* Then, load the needed packages:
+```{r eval = TRUE, results="hide", message=FALSE, warning=FALSE}
+
+library(sf)           # Simple feature for R
+library(dplyr)        # A package for data manipulation
+library(tidyverse)    # A package for data manipulation and plotting
+
+
+library(nimble)       # A package for performing MCMC in R
+
+library(coda)         # A package for summarizing and plotting of MCMC output 
+                      # and diagnostic tests
+library(spdep)        # A package to calculate neighbors
+
+library(patchwork)    # A package to combine plots
+library(GGally)       # A package to do pairplots
+library(ggmcmc)       # MCMC diagnostics with ggplot
+
+library(CARBayes)     # A package for fitting CAR models 
+library(CARBayesdata) # A package with the Scottish lip cancer data
+library(kableExtra)   # packages for formatting tables in rmarkdown
+```
+
+
+
+# Scottish lip cancer data
+
+* Import the health data. Note that Scottish lip cancer can be also loaded from the `CARBayes` package.
+```{r eval=TRUE}
+data(lipdata)
+data(lipdbf)
+data(lipshp)
+```
+
+* Combine the datasets.
+```{r eval=TRUE}
+lipdbf$dbf <- lipdbf$dbf[ ,c(2,1)]
+data.combined <- combine.data.shapefile(data=lipdata, shp=lipshp, dbf=lipdbf)
+```
+
+* Create the neighboring matrix.
+```{r eval=TRUE}
+W <- poly2nb(data.combined)
+W <- nb2mat(W, zero.policy = TRUE, style = "B")
+```
+
+
+# Obtaining the posterior relative risks
+
+## Leroux model
+
+The SIRs will be smoothed using the Poisson-logNormal model. The inference is done with `NIMBLE` called through R. 
+In particular, let each ward $i$ be indexed by  the integers $1, 2,...,N$. The model is as follows:
+\[
+\begin{eqnarray}
+O_{i}|\lambda_{i}  & \sim & \text{Poisson}(\lambda_{i}E_{i} )  \\
+\log(\lambda_{i}) & = & \alpha + \phi_{i}  \\
+\phi & \sim & N\Big(0,\tau_{\phi}^{-1}\big((1-\rho){\bf I} + \rho{\bf Q}^{-}\big)\Big)
+\end{eqnarray}
+\]
+
+where $O_i$ is the observed number of scottish lip cancer cases, $E_{i}$ the expected, $\alpha$ is an intercept term denoting the average log SIR, $\phi_{i}$ is a random intercept and $\tau_{\theta}$ a precision (reciprocal of the variance) term that controls the magnitude of $\theta_{i}$.
+
+## Code
+
+### CARBayes
+
+* We will first write the model in CARBayes:
+```{r eval=TRUE}
+
+# Chain 1
+t_0 <- Sys.time()
+chain1 <- S.CARleroux(formula= observed ~ 1 + offset(log(expected)),
+                      data=data.combined, 
+                      family="poisson", 
+                      W=W,
+                      burnin=10000, 
+                      n.sample=50000, 
+                      thin=2, 
+                      prior.mean.beta=0,        # mean of the normal prior of the intercept
+                      prior.var.beta=1,         # var of the normal prior of the intercept
+                      prior.tau2 = c(1, 0.01),  # the shape and scale of Inv-Gamma
+                      verbose = FALSE) 
+t_1 <- Sys.time()
+t_chain1CARBayes <- t_1 - t_0
+
+# Chain 2
+t_0 <- Sys.time()
+chain2 <- S.CARleroux(formula= observed ~ 1 + offset(log(expected)),
+                      data=data.combined, 
+                      family="poisson", 
+                      W=W,
+                      burnin=10000, 
+                      n.sample=50000, 
+                      thin=2, 
+                      prior.mean.beta=0, 
+                      prior.var.beta=1, 
+                      prior.tau2 = c(1, 0.01), 
+                      verbose = FALSE)
+t_1 <- Sys.time()
+t_chain2CARBayes <- t_1 - t_0
+
+t_CARBayes <- t_chain1CARBayes + t_chain2CARBayes
+```
+
+### NIMBLE
+
+* Define the precision matrix of Leroux.
+```{r}
+Q <- matrix(0, nrow = nrow(W), ncol = ncol(W))
+diag(Q) <- apply(W, 1, sum)
+Q <- Q - W
+```
+
+* We will then write the model in nimble:
+```{r eval=TRUE}
+LerouxCode <- nimbleCode(
+  {
+    for (i in 1:N){
+      
+      O[i] ~ dpois(mu[i])                                
+      log(mu[i]) <- log(E[i]) + alpha + theta[i] 
+      SIR[i] <- exp(alpha + theta[i])
+    } 
+    
+    
+    PrecMat[1:N, 1:N] <- tau.theta*(rho*Q[1:N, 1:N] + (1 - rho)*diag(N))
+    theta[1:N] ~ dmnorm(mean = mu_ler[1:N], prec = PrecMat[1:N,1:N])
+    
+    # intercept
+    alpha ~ dnorm(0, tau = 1)
+    
+    # precision
+    tau.theta ~ dgamma(1, 0.01)        
+    sigma2.theta <- 1/tau.theta   
+    
+    # mixing
+    rho ~ dunif(0,1)                                  
+
+  }
+)
+```
+
+
+* Define the data object for `NIMBLE`
+```{r eval=TRUE}
+
+N = nrow(data.combined)
+
+ScotLipdata = list(
+  O = data.combined$observed       
+)
+
+ScotLipConsts <-list(
+  N = N,                      
+  E = data.combined$expected,          
+  Q = Q, 
+  mu_ler=rep(0, N)
+  
+)
+  
+```
+
+* Initialise the unknown parameters, 2 chains.
+```{r eval=TRUE}
+
+inits <- list(
+  list(alpha=0.01, tau.theta=10, theta = rep(0.01,times=N), rho = 0.5),  # chain 1
+  list(alpha=0.5, tau.theta=1, theta = rep(-0.01,times=N), rho = 0.7) # chain 2
+)
+
+```
+
+
+* Set the parameters that will be monitored.
+```{r eval=TRUE}
+
+params <- c("sigma2.theta", "SIR", "alpha", "rho", "theta")
+
+```
+
+Note that the parameters that are not set, will NOT be monitored!
+
+* Specify the MCMC setting.
+```{r eval=TRUE}
+
+ni <- 50000  # nb iterations 
+nt <- 2      # thinning interval
+nb <- 10000  # nb iterations as burn-in 
+nc <- 2      # nb chains
+
+```
+
+* Run the MCMC simulations calling Nimble from R using the function `nimbleMCMC()`.
+```{r eval=TRUE}
+
+t_0 <- Sys.time()
+Lerouxsamples <- nimbleMCMC(code = LerouxCode,
+                            data = ScotLipdata,
+                            constants = ScotLipConsts, 
+                            inits = inits,
+                            monitors = params,
+                            niter = ni,
+                            nburnin = nb,
+                            thin = nt, 
+                            nchains = nc, 
+                            setSeed = 9, 
+                            progressBar = FALSE,         
+                            samplesAsCodaMCMC = TRUE, 
+                            summary = TRUE
+)
+t_1 <- Sys.time()
+t_smallsetting <- t_1 - t_0
+
+```
+
+
+## Check convergence
+
+### CARBayes
+
+```{r fig.height=4, fig.width=9}
+
+traceplot(chain1$samples$beta, las = 1, main = "intercept", col = "#ff9999")
+traceplot(chain2$samples$beta, add = TRUE, col = "#33cccc")
+grid()
+
+traceplot(chain1$samples$tau2, las = 1, main = "variance", col = "#ff9999")
+traceplot(chain2$samples$tau2, add = TRUE, col = "#33cccc")
+grid()
+
+traceplot(chain1$samples$rho, las = 1, main = "mixing", col = "#ff9999")
+traceplot(chain2$samples$rho, add = TRUE, col = "#33cccc")
+grid()
+
+```
+
+### NIMBLE
+
+* The same plots in `NIMBLE`.
+```{r fig.height=4, fig.width=9}
+
+ggLerouxNIMBLE <- ggs(Lerouxsamples$samples)
+
+ggLerouxNIMBLE %>% filter(Parameter == "alpha") %>% 
+  ggs_traceplot + theme_bw() + theme(text = element_text(size = 12))
+
+ggLerouxNIMBLE %>% filter(Parameter == "sigma2.theta") %>% 
+  ggs_traceplot + theme_bw() + theme(text = element_text(size = 12))
+
+ggLerouxNIMBLE %>% filter(Parameter == "rho") %>% 
+  ggs_traceplot + theme_bw() + theme(text = element_text(size = 12))
+
+```
+
+Using the same number of iterations in NIMBLE, we did not reach convergence, we should change the MCMC setting and rerun the 
+
+```{r eval=FALSE}
+
+ni <- 5000000  # nb iterations 
+nt <- 400      # thinning interval
+nb <- 1000000  # nb iterations as burn-in 
+nc <- 2        # nb chains
+
+t_0 <- Sys.time()
+Lerouxsamples <- nimbleMCMC(code = LerouxCode,
+                            data = ScotLipdata,
+                            constants = ScotLipConsts, 
+                            inits = inits,
+                            monitors = params,
+                            niter = ni,
+                            nburnin = nb,
+                            thin = nt, 
+                            nchains = nc, 
+                            setSeed = 9, 
+                            progressBar = FALSE,         
+                            samplesAsCodaMCMC = TRUE, 
+                            summary = TRUE
+)
+
+t_1 <- Sys.time()
+t_largesetting <- t_1 - t_0
+
+saveRDS(Lerouxsamples, file = "LerouxsamplesLargeSetting")
+
+```
+
+```{r eval=FALSE, echo = FALSE}
+saveRDS(Lerouxsamples, file = "LerouxsamplesLargeSetting")
+```
+
+```{r eval=TRUE, echo = FALSE}
+Lerouxsamples <- readRDS("LerouxsamplesLargeSetting")
+```
+
+* Convergence diagnostics as before.
+```{r fig.height=4, fig.width=9}
+
+ggLerouxNIMBLE <- ggs(Lerouxsamples$samples)
+
+ggLerouxNIMBLE %>% filter(Parameter == "alpha") %>% 
+  ggs_traceplot + theme_bw() + theme(text = element_text(size = 12))
+
+ggLerouxNIMBLE %>% filter(Parameter == "sigma2.theta") %>% 
+  ggs_traceplot + theme_bw() + theme(text = element_text(size = 12))
+
+ggLerouxNIMBLE %>% filter(Parameter == "rho") %>% 
+  ggs_traceplot + theme_bw() + theme(text = element_text(size = 12))
+
+```
+	
+
+## Comparison of the results
+
+### Time to convergence
+
+From the first look, CARBayes needs less time (14 sec) and samples to converge compared to the NIMBLE specification shown in this tutorial (36 minutes). We should consider the current differences in the samplers, for instance CARBayes uses block sampling for the random effects, whereas in our NIBLE specification we do not have block sampling. True is you can employ block sampling in `NIBLE` if needed.
+
+### Check tables
+
+```{r }
+
+data.frame(
+  rbind(
+  c("", "CARBayes", ""),
+  c("Median", "LL", "UL"),
+round(
+rbind(
+  Lerouxsamples$summary$all.chains["alpha", c("Median", "95%CI_low", "95%CI_upp")],
+  Lerouxsamples$summary$all.chains["sigma2.theta", c("Median", "95%CI_low", "95%CI_upp")], 
+  Lerouxsamples$summary$all.chains["rho", c("Median", "95%CI_low", "95%CI_upp")]
+), digits = 2
+), 
+  c("", "NIMBLE", ""),
+round(chain1$summary.results[,1:3], digits= 2)
+)
+) -> tab
+
+
+tab <- cbind(c("", "", "intercept", "variance", "mixing", "", "intercept", "variance", "mixing"), 
+             tab)
+
+colnames(tab) <- NULL
+row.names(tab) <- NULL
+
+knitr::kable(tab, caption = "Median and 95%CrI for the intercept and hyperparameters of the models.") %>% 
+  kable_styling(bootstrap_options = "striped", full_width = F, position = "center")
+
+
+```
+
+Although it seems that the variance and mixing parameter look very similar, the variance of the intercepts is very different.
+
+
+### Check densities
+
+1. CARBayes
+```{r fig.height=3.5, fig.width=10}
+
+par(mfrow = c(1,2), mar = c(2, 2.5, 3.5, 0))
+densplot(chain1$samples$beta, las = 1, main = "Chain 1", 
+         xlim = c(-2.5,2.5), col = "#ff9999")
+
+densplot(chain2$samples$beta, col = "#33cccc", 
+         las = 1, main = "Chain 2", xlim = c(-2.5,2.5))
+title("alpha", outer = TRUE, line = -.9)
+
+densplot(chain1$samples$tau2, las = 1, main = "Chain 1", 
+         col = "#ff9999")
+densplot(chain2$samples$tau2, col = "#33cccc", las = 1, main = "Chain 2")
+title("variance", outer = TRUE, line = -.9)
+
+densplot(chain1$samples$rho, las = 1, main = "Chain 1", 
+         col = "#ff9999")
+densplot(chain2$samples$rho, col = "#33cccc", las = 1, main = "Chain 2")
+title("mixing", outer = TRUE, line = -.9)
+
+```
+
+2. NIMBLE
+```{r fig.height=4, fig.width=4.5}
+
+ggLerouxNIMBLE %>% filter(Parameter == "alpha") %>% 
+  ggs_density() + theme_bw() + theme(text = element_text(size = 12)) + 
+  xlim(c(-2.5,2.5))
+
+ggLerouxNIMBLE %>% filter(Parameter == "sigma2.theta") %>% 
+  ggs_density() + theme_bw() + theme(text = element_text(size = 12))
+
+ggLerouxNIMBLE %>% filter(Parameter == "rho") %>% 
+  ggs_density() + theme_bw() + theme(text = element_text(size = 12))
+
+```
+
+As expected the densities of the intercepts are quite different, with respect to the variation.
+
+### Random effects
+
+1. Median 
+```{r fig.height=4, fig.width=4.5}
+
+dat.points <- data.frame(CARBayes = apply(chain1$samples$phi, 2, median), 
+                         NIMBLE = 
+                         Lerouxsamples$summary$all.chains[paste0("theta[", 1:nrow(data.combined), 
+                                                                 "]"), "Median"])
+
+ggplot() + geom_point(data = dat.points, aes(x = CARBayes, y = NIMBLE)) + 
+  theme_bw() + ylim(c(-1.5, 1.5)) + xlim(c(-1.5, 1.5)) +
+  ggtitle("Medians of the latent fields") + geom_abline(a = 0, b = 1, col = "red")
+
+```
+2. Standard deviations
+
+```{r fig.height=4, fig.width=4.5}
+
+dat.box <- data.frame(sd = c(Lerouxsamples$summary$all.chains[paste0("theta[", 
+                      1:nrow(data.combined), "]"), "St.Dev."], 
+                             apply(chain1$samples$phi, 2, sd)), 
+                      model = c(rep("NIMBLE", times = nrow(data.combined)), 
+                                rep("CARBayes", times = nrow(data.combined))))
+
+ggplot() + geom_boxplot(data = dat.box, aes(x = model, y = sd)) + theme_bw() +
+  ggtitle("SD of the latent fields")
+```
+
+
+
+### SMRs
+
+1. Medians
+```{r}
+
+mat <- matrix(NA, nrow = 20000, ncol = nrow(data.combined))
+for(i in 1:nrow(data.combined)){
+  
+  mat[,i] <- exp(chain1$samples$beta + chain1$samples$phi[,i])
+  
+}
+
+cor(Lerouxsamples$summary$all.chains[paste0("SIR[", 
+    1:nrow(data.combined), "]"), "Median"], 
+    apply(mat, 2, median))
+
+```
+
+2. Standard deviations
+
+```{r fig.height=4, fig.width=4.5}
+
+dat.box <- data.frame(sd = c(Lerouxsamples$summary$all.chains[paste0("SIR[", 
+                      1:nrow(data.combined), "]"), "St.Dev."], 
+                             apply(mat, 2, sd)), 
+                      model = c(rep("NIMBLE", times = nrow(data.combined)), 
+                                rep("CARBayes", times = nrow(data.combined))))
+
+
+ggplot() + geom_boxplot(data = dat.box, aes(x = model, y = sd)) + theme_bw() +
+  ggtitle("SD of the SMRs")
+
+```
+
+The results are very similar (almost identical) with respect to the SMRs.
+
+
+## Conclusion
+
+This tutorial is a first attempt to fit the Leroux model in `NIMBLE`. We compared the results with the `CARBayes` package which is the standard when it comes to fitting the Leroux model. The results are overall similar, with great discrepancy on the intercepts. The variation of the intercept is then inherited to the latent fields. Trying to understand the reason between such discrepancies in the variance of the intercept is work in progress. Any ideas are more than welcome :) 
+
+# References
+

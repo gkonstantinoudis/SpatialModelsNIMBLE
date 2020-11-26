@@ -42,7 +42,6 @@ pre, code {
 </style>
 
 
-
 \pagenumbering{gobble} 
 \pagenumbering{arabic} 
 
@@ -51,7 +50,7 @@ pre, code {
 knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE, fig.align = "center")
 ```
 
-In this document we will perform disease mapping and spatial regression using `NIMBLE` [@nimble]. We will fit a series of disease mapping models with unstructured and structured random effects (ICAR, BYM and BYM2). The data can be downloaded by \href{https://geodacenter.github.io/data-and-lab/scotlip/}{geodacener} and includes lip cancer cases (CANCER) per ward in Scotland during 1975-1980 [@clayton1987]. The dataset also includes the district number (DISTRICT), name (NAME), code (CODE), the population per ward (POP) and the expected number of cases (CEXP) [@lawson1999disease].
+In this document we will perform disease mapping and spatial regression using `NIMBLE` [@nimble]. We will fit a series of disease mapping models with unstructured and structured random effects (ICAR, BYM and BYM2). The data can be downloaded by [geodacenter](https://geodacenter.github.io/data-and-lab/scotlip/) and includes lip cancer cases (CANCER) per ward in Scotland during 1975-1980 [@clayton1987]. The dataset also includes the district number (DISTRICT), name (NAME), code (CODE), the population per ward (POP) and the expected number of cases (CEXP) [@lawson1999disease].
 
 
 # Install and load packages 
@@ -60,12 +59,14 @@ This practical requires the following packages to be installed and attached: `sf
 
 * To install the entire suite of packages, we can use:
 ```{r eval = FALSE,  results="hide"}
-#install.packages(c("sf", "dplyr", "tidyverse", "nimble", "coda", "spdep", "patchwork", "GGally", "ggmcmc"), dependencies = TRUE, repos = "http://cran.r-project.org")
+install.packages(c("sf", "dplyr", "tidyverse", "nimble", "coda", "spdep", "patchwork", 
+                   "GGally", "ggmcmc"), dependencies = TRUE, repos = "http://cran.r-project.org")
 ```
 
 * For `INLA`, you can use 
 ```{r eval = FALSE,  results="hide"}
-# install.packages("INLA",repos=c(getOption("repos"),INLA="https://inla.r-inla-download.org/R/stable"), dep=TRUE)
+install.packages("INLA",repos=c(getOption("repos"),
+                                INLA="https://inla.r-inla-download.org/R/stable"), dep=TRUE)
 ```
 
 * Then, load the needed packages:
@@ -109,8 +110,11 @@ ScotLip$crudeSIR <- ScotLip$CANCER/ScotLip$CEXP
 
 * Some plots for the crude SIRs
 ```{r eval=TRUE, out.width="60%"}
-ggplot() + geom_boxplot(data = ScotLip, aes(y = crudeSIR)) + theme_bw() + theme(text = element_text(size = 12))-> p1
-ggplot() + geom_sf(data = ScotLip, aes(fill = crudeSIR), col = "NA") + scale_fill_viridis_c() + theme_bw() + 
+ggplot() + geom_boxplot(data = ScotLip, aes(y = crudeSIR)) + theme_bw() + 
+           theme(text = element_text(size = 12))-> p1
+
+ggplot() + geom_sf(data = ScotLip, aes(fill = crudeSIR), col = "NA") + 
+           scale_fill_viridis_c() + theme_bw() + 
            theme(axis.text = element_blank(), text = element_text(size = 12)) -> p2
 (p1|p2)
 ```
@@ -118,9 +122,7 @@ ggplot() + geom_sf(data = ScotLip, aes(fill = crudeSIR), col = "NA") + scale_fil
 
 # Obtaining the posterior relative risks (SIRs)
 
-## Model with an unstructured random effect
-
-### Model specification
+## Unstructured random effect
 
 The SIRs will be smoothed using the Poisson-logNormal model. The inference is done with `NIMBLE` called through R. 
 In particular, let each ward $i$ be indexed by  the integers $1, 2,...,N$. The model is as follows:
@@ -145,10 +147,10 @@ UnstrCode <- nimbleCode(
       O[i] ~ dpois(mu[i])                                # Poisson for observed counts 
       log(mu[i]) <- log(E[i]) + alpha + theta[i] 
       
-      theta[i] ~ dnorm(0, tau = tau.theta) 			         # area-specific unstr random effects
-      SIR[i] <- exp(alpha + theta[i])		                 # area-specific SIR
-      resSIR[i] <- exp(theta[i]) 			                   # area-specific residual SIR
-      e[i] <- (O[i]-mu[i])/sqrt(mu[i])     	             # residuals      
+      theta[i] ~ dnorm(0, tau = tau.theta)               # area-specific unstr random effects
+      SIR[i] <- exp(alpha + theta[i])                    # area-specific SIR
+      resSIR[i] <- exp(theta[i])                         # area-specific residual SIR
+      e[i] <- (O[i]-mu[i])/sqrt(mu[i])                   # residuals      
     } 
     
     # Priors:
@@ -192,7 +194,7 @@ inits <- list(
 * Set the parameters that will be monitored:
 ```{r eval=TRUE}
 # Monitored parameters
-params <- c("sigma2.theta", "overallSIR", "resSIR", "SIR", "e", "mu", "alpha")
+params <- c("sigma2.theta", "overallSIR", "resSIR", "SIR", "e", "mu", "alpha", "theta")
 ```
 
 Note that the parameters that are not set, will NOT be monitored!
@@ -358,14 +360,16 @@ ggplot() + geom_boxplot(data = ScotLip, aes(y = postProb)) +
 ```	
 
 
-## Model with an ICAR random effect
+## The ICAR model
+
+### Model specification
 
 We will now fit an ICAR model [@besag1991]. Note that an ICAR prior models strong spatial dependence. The model is as follows:
 \[
 \begin{eqnarray}
 O_{i}|\lambda_{i}  & \sim & \text{Poisson}(\lambda_{i}E_{i} )  \\
 \log(\lambda_{i}) & = & \alpha + \phi_{i}  \\
-\phi_{i} & \sim & \text{ICAR}({\bf W}, 1/\tau_{\phi})
+{\bf \phi} & \sim & \text{ICAR}({\bf W}, 1/\tau_{\phi})
 \end{eqnarray}
 \]
 
@@ -386,8 +390,9 @@ Wards_nb <- poly2nb(pl = ScotLip)
 nbWB_A <- nb2WB(nb = Wards_nb)
 ```	
 
+### Code
 
-* Specify the model. The priors of the model are kept the same. This is not a good practice and in general priors should be motivated by the research question in hand. Nevertheless, the purpose of this tutorial is show how these models are coded in `NIMBLE` and not to answer any research question specific for the scottish lip cancer data. 
+* The priors of the model are kept the same. This is not a good practice and in general priors should be motivated by the research question in hand. Nevertheless, the purpose of this tutorial is show how these models are coded in `NIMBLE` and not to answer any research question specific for the scottish lip cancer data. 
 ```{r eval=TRUE}
 
 
@@ -398,9 +403,9 @@ ICARCode <- nimbleCode(
       O[i] ~ dpois(mu[i])                                # Poisson for observed counts 
       log(mu[i]) <- log(E[i]) + alpha + phi[i]
       
-      SIR[i] <- exp(alpha + phi[i])		                   # area-specific SIR
-      resSIR[i] <- exp(phi[i]) 			                     # area-specific residual SIR
-      e[i] <- (O[i]-mu[i])/sqrt(mu[i])     	             # residuals      
+      SIR[i] <- exp(alpha + phi[i])                      # area-specific SIR
+      resSIR[i] <- exp(phi[i])                           # area-specific residual SIR
+      e[i] <- (O[i]-mu[i])/sqrt(mu[i])                   # residuals      
     } 
     
     # ICAR
@@ -460,7 +465,7 @@ inits <- list(
 * Set the parameters that will be monitored:
 ```{r eval=TRUE}
 # Monitored parameters
-params <- c("sigma2.phi", "overallSIR", "resSIR", "SIR", "e", "mu", "alpha")
+params <- c("sigma2.phi", "overallSIR", "resSIR", "SIR", "e", "mu", "alpha", "phi")
 ```
 
 * Specify the MCMC setting (identical as before):
@@ -532,15 +537,19 @@ ScotLip$ICAR_SIR <- ICARCodesamples$summary$all.chains[paste0("SIR[", 1:N, "]"),
 
 ## The BYM model
 
+### Mdeol specification
+
 The BYM model is probably the most popular model for disease mapping. It is basically a combination of the ICAR model and a model with an unstructured component, see [@besag1991] for more details:
 \[
 \begin{eqnarray}
 O_{i}|\lambda_{i}  & \sim & \text{Poisson}(\lambda_{i}E_{i} )  \\
 \log(\lambda_{i}) & = & \alpha + \theta_{i} + \phi_{i}  \\
 \theta_{i} & \sim & N(0,1/\tau_{\theta}) \\
-\phi_{i} & \sim & \text{ICAR}({\bf W}, 1/\tau_{\phi})
+{\bf \phi} & \sim & \text{ICAR}({\bf W}, 1/\tau_{\phi})
 \end{eqnarray}
 \]
+
+### Code
 
 The code is as follows:
 ```{r eval=TRUE}
@@ -551,10 +560,10 @@ BYMCode <- nimbleCode(
       O[i] ~ dpois(mu[i])                                  # Poisson for observed counts 
       log(mu[i]) <- log(E[i]) + alpha + theta[i] + phi[i]
       
-      theta[i] ~ dnorm(0, tau = tau.theta) 			           # area-specific RE
-      SIR[i] <- exp(alpha + theta[i] + phi[i])		         # area-specific SIR
-      resSIR[i] <- exp(theta[i] + phi[i]) 			           # area-specific residual SIR
-      e[i] <- (O[i]-mu[i])/sqrt(mu[i])     	               # residuals      
+      theta[i] ~ dnorm(0, tau = tau.theta)                 # area-specific RE
+      SIR[i] <- exp(alpha + theta[i] + phi[i])             # area-specific SIR
+      resSIR[i] <- exp(theta[i] + phi[i])                  # area-specific residual SIR
+      e[i] <- (O[i]-mu[i])/sqrt(mu[i])                     # residuals      
     } 
     
     # ICAR
@@ -592,7 +601,7 @@ inits <- list(
 * Parameters to monitor:
 ```{r eval=TRUE}
 # Monitored parameters
-params <- c("sigma2.phi", "sigma2.theta", "overallSIR", "resSIR", "SIR", "e", "mu", "alpha")
+params <- c("sigma2.phi", "sigma2.theta", "overallSIR", "resSIR", "SIR", "e", "mu", "alpha", "theta", "phi")
 ```
 
 * Run the code:
@@ -649,17 +658,20 @@ ScotLip$BYM_SIR <- BYMCodesamples$summary$all.chains[paste0("SIR[", 1:N, "]"), "
 
 ## The BYM2 model
 
-BYM2 is a reparametrization of BYM model which has the following features: 1) It resolves the identifiability issues of the BYM model 2) The hyperparameters of the field are almost orthogonal, facilitating clear interpretation and making prior assignment intuitive, 3) The spatially structured random effect is scaled and thus the hyperprior used in one graph have the same interpretation in any other graph (for instance the hyperpriors for the graph of scottland will have same interpretation as the hyperpriors for the graph of Greece only if the spatially structured random effect is scaled). For more information see @riebler2016 and @freni2018.
+### Model specification
+
+BYM2 is a reparametrization of BYM model which has the following features: 1) It resolves the identifiability issues of the BYM model 2) The hyperparameters of the field are almost orthogonal, facilitating clear interpretation and making prior assignment intuitive, 3) The spatially structured random effect is scaled and thus the hyperprior used in one graph have the same interpretation in any other graph (for instance the hyperpriors for the graph of Scotland will have same interpretation as the hyperpriors for the graph of Greece only if the spatially structured random effect is scaled). For more information see @riebler2016 and @freni2018.
 \[
 \begin{eqnarray}
 O_{i}|\lambda_{i}  & \sim & \text{Poisson}(\lambda_{i}E_{i} )  \\
 \log(\lambda_{i}) & = & \alpha + b_{i}  \\
 b_{i} & = & \frac{1}{\tau_b}\big(\theta\sqrt{1-\rho} + \phi\sqrt{\rho}\big)\\
 \theta_{i} & \sim & N(0,1/\tau_{\theta}) \\
-\phi_{i} & \sim & \text{ICAR}({\bf W^*}, 1)
+{\bf \phi} & \sim & \text{ICAR}({\bf W^*}, 1)
 \end{eqnarray}
 \]
 
+### Code
 
 The code is as follows:
 ```{r eval=TRUE}
@@ -672,10 +684,10 @@ BYM2Code <- nimbleCode(
       
       b[i] <- (1/sqrt(tau.b))*(sqrt((1-rho))*theta[i] + sqrt(rho/scale)*phi[i])
       
-      theta[i] ~ dnorm(0, tau = tau.theta) 			         # area-specific RE
-      SIR[i] <- exp(alpha + b[i])	            	         # area-specific SIR
-      resSIR[i] <- exp(b[i]) 			                       # area-specific residual SIR
-      e[i] <- (O[i]-mu[i])/sqrt(mu[i])     	             # residuals      
+      theta[i] ~ dnorm(0, tau = tau.theta)               # area-specific RE
+      SIR[i] <- exp(alpha + b[i])                        # area-specific SIR
+      resSIR[i] <- exp(b[i])                             # area-specific residual SIR
+      e[i] <- (O[i]-mu[i])/sqrt(mu[i])                   # residuals      
     } 
     
     # ICAR
@@ -703,7 +715,8 @@ BYM2Code <- nimbleCode(
 
 * We need to calculate the scale:
 ```{r eval=TRUE}
-W.scale <- nb2mat(Wards_nb, zero.policy = TRUE, style = "B")           # Wards_nb is the spatial object created using the shapefile and the spdep package
+# Wards_nb is the spatial object created using the shapefile and the spdep package
+W.scale <- nb2mat(Wards_nb, zero.policy = TRUE, style = "B")           
 W.scale <- -W.scale
 diag(W.scale) <- abs(apply(W.scale, 1, sum))
 # solve(W.scale) # this should not work since by definition the matrix is singular
@@ -750,7 +763,7 @@ inits <- list(
 
 * Set the parameters to monitor:
 ```{r eval=TRUE}
-params <- c("sigma2.b", "sigma2.theta", "rho", "overallSIR", "resSIR", "SIR", "e", "mu", "alpha")
+params <- c("sigma2.b", "sigma2.theta", "rho", "overallSIR", "resSIR", "SIR", "e", "mu", "alpha", "b", "theta")
 ```
 
 * Run the BYM2
@@ -869,8 +882,9 @@ ScotLip %>% select(crudeSIR, unstr_SIR, ICAR_SIR, BYM_SIR, BYM2_SIR) %>%
 )
 ```
 
+## Posterior probabilities
 
-* We can also compare the posterior probabilities:
+* We can also compare the posterior probabilities ($\text{Pr}(\text{SIR}>1)$):
 
 ```{r }
 
@@ -901,7 +915,9 @@ ggplot() + geom_sf(data = ScotLip, aes(fill = BYM2_postProb), col = "NA") +
 
 ```
 
-Note that we can also calculate exceedance probabilities in the sampler using the  `step()` function. For example in the BYM2, inside the for loop under the calculation of e, we can add this: `proba.resRR[i] <- step(resRR[i]-1)`. Make sure you monitor `proba.resRR` by specifying it in the `params`. After the sampler works we can take its posterior mean and get the posterior probability.  
+Note that we can also calculate exceedance probabilities in the sampler using the  `step()` function. For example in the BYM2, inside the for loop under the calculation of e, we can add this: `proba.resSIR[i] <- step(resSIR[i]-1)`. Make sure you monitor `proba.resSIR` by specifying it in the `params`. After the sampler works we can take its posterior mean and get the posterior probability.  
+
+## Intercept, hyperparameters and WAIC
 
 * For completeness I am also showing a table of the intercept and hyperparameters. Note that any comparison is conditional on convergence. More effort should be put to examine convergence and to tune the MCMC setting. The table presents the median posterior of the random variables together with the 95% credibility regions. 
 
@@ -935,6 +951,7 @@ knitr::kable(tab, caption = "Median and 95%CrI for the intercept and hyperparame
 
 ```
 
+
 Some interesting features for the table above:
 
 1. The uncertainty of the intercept is larger for the model with the unstructured random effect.
@@ -943,8 +960,37 @@ Some interesting features for the table above:
 4. The Watanabe–Akaike information criterion or WAIC [@watanabe2013] suggests that the best fit model is the ICAR (the smaller the WAIC the better the fit). 
 
 
+## Comparison of the latent fields
+
+```{r echo = FALSE, out.width = '60%'}
+
+data.frame(model = c( rep("Unstr: theta", N), 
+                     rep("ICAR: phi", N), rep("BYM: phi", N), rep("BYM2: b", N)),
+           field =c(UnstrCodesamples$summary$all.chains[paste0("theta[", 1:56, "]"), "Median"],
+                    ICARCodesamples$summary$all.chains[paste0("phi[", 1:56, "]"), "Median"],
+                    # BYMCodesamples$summary$all.chains[paste0("theta[", 1:56, "]"), "Median"] + 
+                      BYMCodesamples$summary$all.chains[paste0("phi[", 1:56, "]"), "Median"],
+                    BYM2Codesamples$summary$all.chains[paste0("b[", 1:56, "]"), "Median"])) %>% 
+  
+  ggplot() + geom_boxplot(aes(x = model, y = field)) + theme_bw() + 
+  theme(text = element_text(size = 14)) + ggtitle("Medians of the field")
+
+
+data.frame(model = c( rep("Unstr: theta", N), 
+                      rep("ICAR: phi", N), rep("BYM: phi", N), rep("BYM2: b", N)),
+           sd =c(UnstrCodesamples$summary$all.chains[paste0("theta[", 1:56, "]"), "St.Dev."],
+                    ICARCodesamples$summary$all.chains[paste0("phi[", 1:56, "]"), "St.Dev."],
+                    # BYMCodesamples$summary$all.chains[paste0("theta[", 1:56, "]"), "St.Dev."] + 
+                      BYMCodesamples$summary$all.chains[paste0("phi[", 1:56, "]"), "St.Dev."],
+                    BYM2Codesamples$summary$all.chains[paste0("b[", 1:56, "]"), "St.Dev."])) %>% 
+  
+  ggplot() + geom_boxplot(aes(x = model, y = sd)) + theme_bw() + 
+  theme(text = element_text(size = 14)) + ggtitle("SDs of the field")
+
+```
+
 # Conclusion
-The purpose of this tutorial is to show how to fit spatial models using `NIMBLE` [@nimble]. Nevertheless, the tutorial does not provide an exhaustive list of spatial model that can be fit in `NIMBLE`. Examples of other models include the proper model [@cressie1989], the Leroux model [@leroux2000], see also @best2005 and @lee2011 for simulation studies and relevant comparisons. Additional sources for code include the tutorial by Lawson [@lawson2020nimble] and also chapter 9 of \href{https://r-nimble.org/html_manual/cha-welcome-nimble.html}{the NIMBLE manual}.
+The purpose of this tutorial is to show how to fit spatial models using `NIMBLE` [@nimble]. Nevertheless, the tutorial does not provide an exhaustive list of spatial model that can be fit in `NIMBLE`. Examples of other models include the proper model [@cressie1989], the Leroux model [@leroux2000], see also @best2005 and @lee2011 for simulation studies and relevant comparisons. Additional sources for code include the tutorial by Lawson [@lawson2020nimble] and also chapter 9 of [the NIMBLE manual](https://r-nimble.org/html_manual/cha-welcome-nimble.html).
 
 
 # References
