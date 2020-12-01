@@ -1,0 +1,863 @@
+---
+title: "Splines and random walk processes in NIMBLE"
+author: "Garyfallos Konstantinoudis"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+bibliography: biblio.bib
+---
+
+
+<style type="text/css">
+body{ /* Normal  */
+      font-size: 14px;
+  }
+h1.title {
+  font-size: 30px;
+  color: black;
+  font-weight: bold;
+}
+h1 { /* Header 1 */
+    font-size: 25px;
+  color: black;
+  font-weight: bold;
+}
+h2 { /* Header 2 */
+    font-size: 20px;
+  color: black;
+  font-weight: bold;
+}
+h3 { /* Header 3 */
+    font-size: 15px;
+  color: black;
+  font-weight: bold;
+}
+code.r{ /* Code block */
+    font-size: 14px;
+}
+pre, code {
+    color: 	#1B0F0E;
+  }
+</style>
+
+
+\pagenumbering{gobble} 
+\pagenumbering{arabic} 
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE, fig.align = "center")
+```
+
+In this document we will show how to use splines and random walks for flexible fits using `NIMBLE` [@nimble]. We will use the Chicago dataset as it can be found in the `dlnm` package. Using typing `help(chicagoNMMAPS)` you will find the following information about the dataset:
+
+The data set contains daily mortality (all causes, CVD, respiratory), weather (temperature, dew point temperature, relative humidity) and pollution data (PM10 and ozone) for Chicago in the period 1987-2000 from the National Morbidity, Mortality and Air Pollution Study (NMMAPS).
+
+The purpose of the tutorial is to assess the effect of temperature on the number of deaths of all causes, using the Chicago dataset. We will start fitting a linear effect and then to allow more flexible fits, we will consider splines, RW1 and RW2.
+
+## Install and load packages 
+
+This practical requires the following packages to be installed and attached: `sf`, `dplyr`, `tidyverse`,  `nimble`, `coda`, `spdep`, `patchwork`, `GGally`, `ggmcmc`, `kableExtra`, `splines2` and `dlnm`. 
+
+* To install the entire suite of packages, we can use:
+```{r eval = FALSE,  results="hide"}
+install.packages(c("sf", "dplyr", "tidyverse", "nimble", "coda", "spdep", "patchwork", 
+                   "GGally", "ggmcmc", "dlnm", "splines2", "kableExtra"), dependencies = TRUE, repos = "http://cran.r-project.org")
+```
+
+
+* Then, load the needed packages:
+```{r eval = TRUE, results="hide", message=FALSE, warning=FALSE}
+library(sf)           # Simple feature for R
+library(dplyr)        # A package for data manipulation
+library(tidyverse)    # A package for data manipulation and plotting
+library(nimble)       # A package for performing MCMC in R
+library(coda)         # A package for summarizing and plotting of MCMC output 
+                      # and diagnostic tests
+library(spdep)        # A package to calculate neighbors
+library(patchwork)    # A package to combine plots
+library(GGally)       # A package to do pairplots
+library(ggmcmc)       # MCMC diagnostics with ggplot
+library(dlnm)         # A package for performing dlnms in R
+library(splines2)     # A package to fit splines in R
+library(kableExtra)   # packages for formatting tables in rmarkdown
+```
+
+
+
+## Import and explore the Chicago dataset
+
+* Import the health data
+```{r eval=TRUE}
+head(chicagoNMMAPS, 10)
+```
+
+Please notice that there are also missing values. 
+
+* Calculate the number of missing values per row
+```{r eval=TRUE}
+summary(chicagoNMMAPS)
+```
+
+There are 1096 missing values for the mean daily relative humidity and 251 for PM$_10$.
+
+* Some plots for the pollutants
+```{r eval=TRUE, fig.width=9, fig.height=7}
+ggplot() + geom_point(data = chicagoNMMAPS, aes(x = time, y = rhum), size = .5) + theme_bw() + 
+           theme(text = element_text(size = 10)) + ggtitle("Relative humidity") +
+           ylab("") -> p1
+
+ggplot() + geom_point(data = chicagoNMMAPS, aes(x = time, y = pm10), size = .5) + theme_bw() + 
+           theme(text = element_text(size = 10)) + ggtitle("PM10") +
+           ylab("") -> p2
+
+ggplot() + geom_point(data = chicagoNMMAPS, aes(x = time, y = temp), size = .5) + theme_bw() + 
+           theme(text = element_text(size = 10)) + ggtitle("Temperature") +
+           ylab("") -> p3
+
+ggplot() + geom_point(data = chicagoNMMAPS, aes(x = time, y = o3), size = .5) + theme_bw() + 
+           theme(text = element_text(size = 10)) + ggtitle("O3") +
+           ylab("") -> p4
+
+(p1|p2)/(p3|p4)
+```
+
+There is a clear seasonality for all of the variables assessed.
+
+
+## Linear effect
+
+At this section, we will examine the effect of temperature on all cause mortality.
+
+* Nimble model
+```{r eval=TRUE}
+LinearCode <- nimbleCode(
+  {
+    for (i in 1:N){
+      
+      O[i] ~ dpois(mu[i])                                # Poisson for observed counts 
+      log(mu[i]) <- alpha + b*temperature[i]
+  
+    } 
+    
+    # Priors:
+    alpha ~ dflat()                                      # Unif(-inf, +inf)
+    exp.alpha <- exp(alpha)                              # overall counts across time period
+    
+    b ~ dnorm(0, tau = 5)
+    b.exp <- exp(b)
+  }
+)
+```
+
+
+* Data objects:
+```{r eval=TRUE}
+N <- dim(chicagoNMMAPS)[1] 
+# Format the data for NIMBLE in a list
+ChicagoData = list(
+                 O = chicagoNMMAPS$death,                  # observed nb of deaths
+                 temperature = chicagoNMMAPS$temp          # daily temperature
+)
+ChicagoConsts <-list(
+                 N = N                                     # nb of time points
+)
+  
+```
+
+* Initialize the parameters:
+```{r eval=TRUE}
+# Initialise the unknown parameters, 2 chains
+inits <- list(
+  list(alpha=0, b=0),  # chain 1
+  list(alpha=-2, b=1))   # chain 2
+```
+
+
+* Set the parameters that will be monitored:
+```{r eval=TRUE}
+params <- c("b.exp", "exp.alpha", "mu", "alpha", "b")
+```
+
+Note that the parameters that are not set, will NOT be monitored!
+
+* Specify the MCMC setting:
+```{r eval=TRUE}
+# MCMC setting
+ni <- 50000  # nb iterations 
+nt <- 10     # thinning interval
+nb <- 10000   # nb iterations as burn-in 
+nc <- 2      # nb chains
+```
+
+The burn-in should be long enough to discard the initial part of the Markov chains that have not yet converged to the stationary distribution.
+
+* Run the MCMC simulations calling Nimble from R using the function `nimbleMCMC()`
+```{r eval=FALSE}
+t_0 <- Sys.time()
+LinearModel <- nimbleMCMC(code = LinearCode,
+                      data = ChicagoData,
+                      constants = ChicagoConsts, 
+                      inits = inits,
+                      monitors = params,
+                      niter = ni,
+                      nburnin = nb,
+                      thin = nt, 
+                      nchains = nc, 
+                      setSeed = 9, 
+                      progressBar = FALSE,     
+                      samplesAsCodaMCMC = TRUE, 
+                      summary = TRUE, 
+                      WAIC = TRUE
+                      )
+t_1 <- Sys.time()
+time_linear <- t_1 - t_0
+```
+
+
+```{r eval = TRUE, echo = FALSE}
+
+# saveRDS(LinearModel, file = "LinearModel")
+LinearModel <- readRDS("LinearModel")
+
+```
+
+```{r fig.height=4.5, fig.width=6}
+linear_ggs <- ggs(LinearModel$samples)
+
+linear_ggs %>% filter(Parameter == c("alpha", "b")) %>% 
+  ggs_traceplot() + theme_bw()
+
+```
+
+* Check the results
+```{r}
+tab <- 
+round(LinearModel$summary$all.chains[c("exp.alpha", "b.exp"),], 
+      digits = 3)
+
+knitr::kable(tab, caption = "Median and 95%CrI for the covariate coefficients of the linear model.") %>%  kable_styling(bootstrap_options = "striped", full_width = F, position = "center")
+```
+
+
+## Splines
+
+* Define the matrix of the cubic splines:
+```{r}
+# define the knots
+knots <- c(0, 10, 20)
+# and the matrix
+bsMat <- bSpline(chicagoNMMAPS$temp, 
+                 knots = knots, 
+                 degree = 3, 
+                 intercept = TRUE)
+
+```
+
+* Nimble model
+```{r eval=TRUE}
+SplinesCode <- nimbleCode(
+  {
+    for (i in 1:N){
+      
+      O[i] ~ dpois(mu[i])                                # Poisson for observed counts 
+      log(mu[i]) <- inprod(beta[], X[i,])
+  
+    } 
+    
+    # Priors:
+    # alpha ~ dflat()                                      # Unif(-inf, +inf)
+    # exp.alpha <- exp(alpha)                              # overall counts across time period
+    
+    for(j in 1:7){
+	    beta[j] ~ dnorm(0, tau = 5)
+      exp.beta[j] <- exp(beta[j])                        # the coefficients of the splines
+    }
+  }
+)
+```
+
+
+* Data objects:
+```{r eval=TRUE}
+N <- dim(chicagoNMMAPS)[1] 
+# Format the data for NIMBLE in a list
+ChicagoData = list(
+                 O = chicagoNMMAPS$death,                  # observed nb of deaths
+                 X = bsMat                                 # the functional form of temperature
+)
+ChicagoConsts <-list(
+                 N = N                                     # nb of time points
+)
+  
+```
+
+* Initialize the parameters:
+```{r eval=TRUE}
+# Initialise the unknown parameters, 2 chains
+inits <- list(
+  list(beta=rep(0, 7)),  # chain 1
+  list(beta=rep(1, 7))# chain 2
+)
+```
+
+
+* Set the parameters that will be monitored:
+```{r eval=TRUE}
+params <- c("mu", paste0("beta[", 1:7, "]"), 
+            paste0("exp.beta[", 1:7, "]"))
+```
+
+* Specify the MCMC setting:
+```{r eval=TRUE}
+# MCMC setting
+ni <- 50000  # nb iterations 
+nt <- 10     # thinning interval
+nb <- 10000   # nb iterations as burn-in 
+nc <- 2      # nb chains
+```
+
+
+* Run the MCMC simulations calling Nimble from R using the function `nimbleMCMC()`
+```{r eval=FALSE}
+t_0 <- Sys.time()
+SplinesModel <- nimbleMCMC(code = SplinesCode,
+                      data = ChicagoData,
+                      constants = ChicagoConsts, 
+                      inits = inits,
+                      monitors = params,
+                      niter = ni,
+                      nburnin = nb,
+                      thin = nt, 
+                      nchains = nc, 
+                      setSeed = 9, 
+                      progressBar = FALSE,      
+                      samplesAsCodaMCMC = TRUE, 
+                      summary = TRUE, 
+                      WAIC = TRUE
+                      )
+t_1 <- Sys.time()
+time_splines <- t_1 - t_0
+```
+
+```{r eval = TRUE,echo = FALSE}
+# saveRDS(SplinesModel, file = "SplinesModel")
+SplinesModel <- readRDS("SplinesModel")
+```
+
+
+* Check convergence
+
+```{r fig.height=12, fig.width=7}
+splines_ggs <- ggs(SplinesModel$samples)
+
+splines_ggs %>% filter(Parameter == c("exp.alpha", paste0("beta[", 1:7, "]"))) %>% 
+  ggs_traceplot() + theme_bw()
+
+```
+
+* Extract the result
+```{r fig.height=4, fig.width=6}
+
+round(
+SplinesModel$summary$all.chains[paste0("exp.beta[", 1:7, "]"),],
+digits = 2
+)
+
+# try to plot it
+chicagoNMMAPS$tmp_spline <- 
+bsMat %*% SplinesModel$summary$all.chains[c(paste0("beta[", 1:7, "]")), "Median"]
+
+# spline
+chicagoNMMAPS$log.countLL <-  bsMat %*% SplinesModel$summary$all.chains[c(paste0("beta[", 1:7, "]")), "95%CI_low"]
+chicagoNMMAPS$log.countUL <- bsMat %*% SplinesModel$summary$all.chains[c(paste0("beta[", 1:7, "]")), "95%CI_upp"]
+
+
+dat_spline = data.frame(temp = chicagoNMMAPS$temp, 
+                 median = chicagoNMMAPS$tmp_spline, 
+                 LL = chicagoNMMAPS$log.countLL, 
+                 UL = chicagoNMMAPS$log.countUL)
+
+
+ggplot() + geom_line(data = dat_spline, aes(x = temp, y = exp(median))) + 
+  geom_line(data = dat_spline, aes(x = temp, y = exp(LL)), linetype = 2) + 
+  geom_line(data = dat_spline, aes(x = temp, y = exp(UL)), linetype = 2) + 
+  theme_bw() + xlab("Temperature") + ylab("Number of cases") + 
+  ggtitle("Splines")
+
+
+```
+
+## Random Walk 1
+
+Now I will allow a more flexible fit using the random walk process. The idea is to create an ordered variable by categorizing the continuous variable of interest (i.e. temperature). The ordered variable is created because based on this, we will get the neighboring structure required for the RW1 process. We can sample using `dcar_normal()` and weights in a similar fashion as the geographical weights in previous tutorials. 
+
+
+* Define the ordered variable for RW.
+```{r}
+chicagoNMMAPS$temp_cat <- cut(
+  chicagoNMMAPS$temp, 
+  breaks = seq(from = min(chicagoNMMAPS$temp), 
+               to  = max(chicagoNMMAPS$temp), 
+               length.out = 200),
+  labels = 1:199,
+  include.lowest = TRUE
+)
+
+chicagoNMMAPS$temp_cat_order <-
+  as.numeric(droplevels(chicagoNMMAPS$temp_cat))
+
+chicagoNMMAPS <- chicagoNMMAPS[order(chicagoNMMAPS$temp_cat_order),]
+
+
+```
+
+* Define the weights for the covariance matrix. 
+```{r}
+
+K <- max(chicagoNMMAPS$temp_cat_order)
+W <- matrix(0, nrow = K, ncol = K)
+
+for(i in 1:(K-1)) W[i,i+1] <- 1
+for(i in 1:(K-1)) W[i+1,i] <- 1
+
+Wnb <- mat2listw(W)
+Wnb <- nb2WB(nb = Wnb$neighbours)
+
+```
+
+* Nimble model.
+```{r eval=TRUE}
+RW1_Code <- nimbleCode(
+  {
+    for (i in 1:N){
+      
+      O[i] ~ dpois(mu[i])                                # Poisson for observed counts 
+      log(mu[i]) <- alpha + u[temp.ord[i]]
+    } 
+    
+   # intrinsic CAR prior on the effect of temperature
+   u[1:K] ~ dcar_normal(adj[1:L], weights[1:L], num[1:K], tau.u, zero_mean = 1)
+
+   # Priors:
+   alpha ~ dflat()                                      # Unif(-inf, +inf)
+   exp.alpha <- exp(alpha)                              # overall counts across time period
+   
+   tau.u ~ dgamma(1, 0.01)                              # precision of the ICAR component
+   sigma2.u <- 1/tau.u  
+  }
+)
+```
+
+
+* Data objects:
+```{r eval=TRUE}
+
+# Format the data for NIMBLE in a list
+ChicagoData = list(
+                 O = chicagoNMMAPS$death                   
+                 
+)
+ChicagoConsts <-list(
+                 N = N,  
+                 L = length(Wnb$adj),
+                 K = K,
+                 adj = Wnb$adj,                             
+                 num = Wnb$num,
+                 weights = Wnb$weights, 
+                 temp.ord = chicagoNMMAPS$temp_cat_order
+)
+
+```
+
+* Initialize the parameters:
+```{r eval=TRUE}
+inits <- list(
+  list(alpha=0.01, 
+       tau.u=0.1,
+       u=rep(0.1, times = length(Wnb$num))),  # chain 1
+  list(alpha=2,
+       tau.u=0.01,
+       u=rep(0.01, times = length(Wnb$num)))# chain 2
+)
+```
+
+
+* Set the parameters that will be monitored:
+```{r eval=TRUE}
+params <- c("exp.alpha", "mu", "u", "tau.u", 
+            "alpha")
+```
+
+* Specify the MCMC setting:
+```{r eval=TRUE}
+# MCMC setting
+ni <- 50000  # nb iterations 
+nt <- 10     # thinning interval
+nb <- 10000   # nb iterations as burn-in 
+nc <- 2      # nb chains
+```
+
+
+* Run the MCMC simulations calling Nimble from R using the function `nimbleMCMC()`
+```{r eval=FALSE}
+t_0 <- Sys.time()
+RW1_Model <- nimbleMCMC(code = RW1_Code,
+                      data = ChicagoData,
+                      constants = ChicagoConsts, 
+                      inits = inits,
+                      monitors = params,
+                      niter = ni,
+                      nburnin = nb,
+                      thin = nt, 
+                      nchains = nc, 
+                      setSeed = 9, 
+                      progressBar = FALSE,      
+                      samplesAsCodaMCMC = TRUE, 
+                      summary = TRUE, 
+                      WAIC = TRUE
+                      )
+t_1 <- Sys.time()
+time_rw1 <- t_1 - t_0
+```
+
+```{r eval=TRUE, echo = FALSE}
+# saveRDS(RW1_Model, file = "RW1_Model")
+
+RW1_Model <- readRDS("RW1_Model")
+```
+
+* Check convergence
+
+```{r fig.height=4.5, fig.width=6}
+rw1_ggs <- ggs(RW1_Model$samples)
+
+rw1_ggs %>% filter(Parameter == c("u[10]", "u[115]")) %>% 
+  ggs_traceplot() + theme_bw()
+
+rw1_ggs %>% filter(Parameter == c("exp.alpha", "tau.u")) %>% 
+  ggs_traceplot() + theme_bw()
+
+```
+
+* Extract the results
+```{r fig.height=4, fig.width=6}
+
+tmp_cat = cut(
+  chicagoNMMAPS$temp, 
+  breaks = seq(from = min(chicagoNMMAPS$temp), 
+               to  = max(chicagoNMMAPS$temp), 
+               length.out = 200),
+  labels = seq(from = min(chicagoNMMAPS$temp), 
+               to  = max(chicagoNMMAPS$temp), 
+               length.out = 200)[-1],
+  include.lowest = TRUE
+)
+
+tmp_cat <- droplevels(tmp_cat)
+tmp_cat <- 
+round(as.numeric(as.character(levels(tmp_cat))), digits = 3)
+
+datRW1 = data.frame(temp = tmp_cat, 
+                 median = RW1_Model$summary$all.chains[paste0("u[", 1:180, "]"), "Median"], 
+                 LL = RW1_Model$summary$all.chains[paste0("u[", 1:180, "]"), "95%CI_low"], 
+                 UL = RW1_Model$summary$all.chains[paste0("u[", 1:180, "]"), "95%CI_upp"])
+
+ggplot() + geom_line(data = datRW1, aes(x = temp, y = exp(median))) + 
+  geom_line(data = datRW1, aes(x = temp, y = exp(LL)), linetype = 2) + 
+  geom_line(data = datRW1, aes(x = temp, y = exp(UL)), linetype = 2) + 
+  theme_bw() + xlab("Temperature") + ylab("Risk") + 
+  geom_hline(yintercept = 1, col = "red", linetype = 2) + 
+  ggtitle("Random walk 1")
+
+```
+
+
+
+## Random Walk 2
+
+Now I will use RW2 to get a smoother effect. The RW2 approximates a thin plate spline. The idea is similar as before, ie to create an ordered variable, nevertheless the weights should be defined differently. 
+
+
+* Define the variable for RW.
+```{r}
+chicagoNMMAPS$temp_cat <- cut(
+  chicagoNMMAPS$temp, 
+  breaks = seq(from = min(chicagoNMMAPS$temp), 
+               to  = max(chicagoNMMAPS$temp), 
+               length.out = 200),
+  labels = 1:199,
+  include.lowest = TRUE
+)
+
+
+chicagoNMMAPS$temp_cat_order <-
+  as.numeric(droplevels(chicagoNMMAPS$temp_cat))
+
+chicagoNMMAPS <- chicagoNMMAPS[order(chicagoNMMAPS$temp_cat_order),]
+```
+
+* Define the inputs of `dcar_normal()` prior
+```{r}
+K <- max(chicagoNMMAPS$temp_cat_order)
+
+rest.comp <- list()
+for(i in 3:(K-2)){
+  rest.comp[[i]] <- c(i-2, i-1, i+1, i+2)
+}
+rest.comp <- unlist(rest.comp)
+
+adj = c(2, 3, 1, 3, 4, 
+        rest.comp, 
+        c(K-3, K-2, K, K-2, K-1)
+        )
+
+num = c(2, 3, rep(4, times = c(K-4)), 3, 2)
+
+weights = c(c(2, -1, 2, 4, -1), 
+            rep(c(-1, 4, 4, -1), times = c(K-4)),
+            c(-1, 4, 2, -1, 2))
+
+```
+
+* Nimble model
+```{r eval=TRUE}
+RW2_Code <- nimbleCode(
+  {
+    for (i in 1:N){
+      
+      O[i] ~ dpois(mu[i])                                # Poisson for observed counts 
+      log(mu[i]) <- alpha + u[temp.ord[i]]
+    } 
+    
+   # intrinsic CAR prior on the effect of temperature
+   u[1:K] ~ dcar_normal(adj = adj[1:L], weights  = weights[1:L], num = num[1:K], 
+                        tau = tau.u, c = 2, zero_mean = 1) # we dont need sum to zero here
+
+   # Priors:
+   alpha ~ dflat()                                      # Unif(-inf, +inf)
+   exp.alpha <- exp(alpha)                              # overall counts across time period
+   
+   tau.u ~ dgamma(1, 0.01)                              # precision of the ICAR component
+   sigma2.u <- 1/tau.u  
+  }
+)
+```
+
+
+* Data objects:
+```{r eval=TRUE}
+
+# Format the data for NIMBLE in a list
+ChicagoData = list(
+                 O = chicagoNMMAPS$death                   
+                 
+)
+ChicagoConsts <-list(
+                 N = N,  
+                 L = length(weights),
+                 K = K,
+                 adj = adj,                             
+                 num = num,
+                 weights = weights, 
+                 temp.ord = chicagoNMMAPS$temp_cat_order
+)
+
+```
+
+* Initialize the parameters:
+```{r eval=TRUE}
+inits <- list(
+  list(alpha=0.01, 
+       tau.u=0.1,
+       u=rep(0.1, times = K)),  # chain 1
+  list(alpha=2,
+       tau.u=0.01,
+       u=rep(0.01, times = K))# chain 2
+)
+```
+
+
+* Set the parameters that will be monitored:
+```{r eval=TRUE}
+params <- c("exp.alpha", "mu", "u", "tau.u")
+```
+
+* Specify the MCMC setting:
+```{r eval=TRUE}
+# MCMC setting
+ni <- 50000  # nb iterations 
+nt <- 10     # thinning interval
+nb <- 10000   # nb iterations as burn-in 
+nc <- 2      # nb chains
+```
+
+
+* Run the MCMC simulations calling Nimble from R using the function `nimbleMCMC()`
+```{r eval=FALSE}
+t_0 <- Sys.time()
+RW2_Model <- nimbleMCMC(code = RW2_Code,
+                      data = ChicagoData,
+                      constants = ChicagoConsts, 
+                      inits = inits,
+                      monitors = params,
+                      niter = ni,
+                      nburnin = nb,
+                      thin = nt, 
+                      nchains = nc, 
+                      setSeed = 9, 
+                      progressBar = FALSE,      
+                      samplesAsCodaMCMC = TRUE, 
+                      summary = TRUE, 
+                      WAIC = TRUE
+                      )
+t_1 <- Sys.time()
+time_rw2 <- t_1 - t_0
+```
+
+```{r eval=TRUE, echo = FALSE}
+# saveRDS(RW2_Model, file = "RW2_Model")
+RW2_Model <- readRDS("RW2_Model")
+```
+
+* Check convergence
+
+```{r fig.height=4.5, fig.width=6}
+rw2_ggs <- ggs(RW2_Model$samples)
+
+rw2_ggs %>% filter(Parameter == c("u[10]", "u[99]")) %>% 
+  ggs_traceplot() + theme_bw()
+
+rw2_ggs %>% filter(Parameter == c("exp.alpha", "tau.u")) %>% 
+  ggs_traceplot() + theme_bw()
+
+```
+
+```{r fig.height=4, fig.width=6}
+datRW2 = data.frame(temp = tmp_cat, 
+                 median = RW2_Model$summary$all.chains[paste0("u[", 1:180, "]"), "Median"], 
+                 LL = RW2_Model$summary$all.chains[paste0("u[", 1:180, "]"), "95%CI_low"], 
+                 UL = RW2_Model$summary$all.chains[paste0("u[", 1:180, "]"), "95%CI_upp"])
+
+ggplot() + geom_line(data = datRW2, aes(x = temp, y = exp(median))) + 
+  geom_line(data = datRW2, aes(x = temp, y = exp(LL)), linetype = 2) + 
+  geom_line(data = datRW2, aes(x = temp, y = exp(UL)), linetype = 2) + 
+  theme_bw() + xlab("Temperature") + ylab("Risk") + 
+  geom_hline(yintercept = 1, col = "red", linetype = 2) + 
+  ggtitle("Random walk 2")
+
+```
+
+
+## Comparison of the curves
+
+* Compare the medians
+```{r fig.height=4, fig.width=6}
+# linear trend
+dat_linear <- data.frame(temperature = datRW1$temp)
+dat_linear$log.count <- 
+LinearModel$summary$all.chains["alpha", "Median"] +
+LinearModel$summary$all.chains["b", "Median"]*datRW1$temp
+dat_linear$model <- "linear"
+
+# spline
+dat_spline2 <- data.frame(temperature = dat_spline$temp, 
+                         log.count = dat_spline$median,
+                         model = "splines"
+                           )
+
+
+# rw1
+dat_rw1 <- data.frame(temperature = chicagoNMMAPS$temp, 
+                      log.count = log(RW1_Model$summary$all.chains[paste0("mu[", 1:nrow(chicagoNMMAPS), "]"), "Median"]), 
+                      model = "RW1"
+      )
+
+# rw2
+dat_rw2 <- data.frame(temperature = chicagoNMMAPS$temp, 
+                      log.count = log(RW2_Model$summary$all.chains[paste0("mu[", 1:nrow(chicagoNMMAPS), "]"), "Median"]), 
+                      model = "RW2"
+      )
+
+dat_plot <- rbind(dat_linear, dat_spline2, dat_rw1, dat_rw2)
+
+
+ggplot() + 
+  geom_line(data = dat_plot, aes(x = temperature, y = log.count, col = model), size = 1) + 
+  scale_color_viridis_d() + 
+  theme_bw() +
+  ggtitle("Comparison of models")
+
+```
+
+* Get the uncertainties too
+```{r fig.height=8, fig.width=10}
+
+# linear trend
+dat_linear$log.countLL <- 
+LinearModel$summary$all.chains["alpha", "95%CI_low"] +
+LinearModel$summary$all.chains["b", "95%CI_low"]*datRW1$temp
+
+dat_linear$log.countUL <- 
+LinearModel$summary$all.chains["alpha", "95%CI_upp"] +
+LinearModel$summary$all.chains["b", "95%CI_upp"]*datRW1$temp
+
+# splines
+dat_spline2$log.countLL <- dat_spline$LL
+dat_spline2$log.countUL <- dat_spline$UL
+
+# rw1
+dat_rw1$log.countLL <- log(RW1_Model$summary$all.chains[paste0("mu[", 1:nrow(chicagoNMMAPS), "]"), "95%CI_low"])
+dat_rw1$log.countUL <- log(RW1_Model$summary$all.chains[paste0("mu[", 1:nrow(chicagoNMMAPS), "]"), "95%CI_upp"])
+
+
+# rw2
+dat_rw2$log.countLL <- log(RW2_Model$summary$all.chains[paste0("mu[", 1:nrow(chicagoNMMAPS), "]"), "95%CI_low"])
+dat_rw2$log.countUL <- log(RW2_Model$summary$all.chains[paste0("mu[", 1:nrow(chicagoNMMAPS), "]"), "95%CI_upp"])
+
+
+dat_plot_CrI <- rbind(dat_linear, dat_spline2, dat_rw1, dat_rw2)
+
+
+ggplot(data = dat_plot_CrI) + 
+    geom_ribbon(aes(x = temperature, ymin = log.countLL, ymax = log.countUL, fill = model), alpha = .2) + 
+   geom_line(aes(x = temperature, y = log.count, col = model)) +
+  facet_wrap(~model, ncol = 2) +
+  theme_bw() +
+  scale_color_viridis_d() + 
+  scale_fill_viridis_d() +
+  ggtitle("Comparison of models") +
+  theme(text = element_text(size=15))
+
+```
+
+* Compare time
+```{r eval = FALSE}
+dat_time = data.frame(
+  time_linear = time_linear, 
+  time_splines = time_splines, 
+  time_rw1 = time_rw1, 
+  time_rw2 = time_rw2
+)
+```
+
+```{r eval = TRUE, echo = FALSE}
+# saveRDS(dat_time, file = "dat_time")
+dat_time <- readRDS("dat_time")
+```
+
+```{r}
+dat_time[1,] <- round(as.numeric(dat_time), digits = 2)
+colnames(dat_time) <- c("linear", "splines", "RW1", "RW2")
+
+knitr::kable(dat_time, caption = "Time needed to fit the models") %>%  kable_styling(bootstrap_options = "striped", full_width = F, position = "center")
+```
+
+
+##  Conclusion
+The time needed to fit the models with flexible temperature effects was similar. It seems that bsplines used here provide a smoother fit compared to the RW2. Of course this, in both cases depend on the corresponding specifications. For instance, had I used more knots in the spline specification, the result would have been less smooth. In a similar fashion, had I used an informative prior for the variance hyperpapameter (that does not allow much variation) in the RW2 I could have achieved higher amount of smoothing. At the end, smoothing is a parameter that should be tuned by the investigator and be problem specific. 
+
+##  References
+
+
