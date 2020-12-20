@@ -352,7 +352,7 @@ SplinesModel <- readRDS("SplinesModel")
 ```{r fig.height=12, fig.width=7}
 splines_ggs <- ggs(SplinesModel$samples)
 
-splines_ggs %>% filter(Parameter == c("exp.alpha", paste0("beta[", 1:7, "]"))) %>% 
+splines_ggs %>% filter(Parameter == c(paste0("beta[", 1:7, "]"))) %>% 
   ggs_traceplot() + theme_bw()
 
 ```
@@ -856,7 +856,7 @@ knitr::kable(dat_time, caption = "Time needed to fit the models") %>%  kable_sty
 
 
 ##  Conclusion
-The time needed to fit the models with flexible temperature effects was similar. It seems that bsplines used here provide a smoother fit compared to the RW2. Of course this, in both cases depend on the corresponding specifications. For instance, had I used more knots in the spline specification, the result would have been less smooth. In a similar fashion, had I used an informative prior for the variance hyperpapameter (that does not allow much variation) in the RW2 I could have achieved higher amount of smoothing. At the end, smoothing is a parameter that should be tuned by the investigator and be problem specific. 
+The time needed to fit the models with flexible temperature effects was similar. It seems that bsplines used here provide a smoother fit compared to the RW2. Of course this, in both cases depend on the corresponding specifications. For instance, had I used more knots in the spline specification, the result would have been less smooth. In a similar fashion, had I used an informative prior for the variance hyperpapameter (that does not allow much variation) in the RW2 I could have achieved higher amount of smoothing. In the end, smoothing is a parameter that should be tuned by the investigator and be problem specific. 
 
 ##  References
 
