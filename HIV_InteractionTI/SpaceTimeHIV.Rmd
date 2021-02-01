@@ -53,11 +53,11 @@ knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE, fig.align = "ce
 ```
 
 
-In this practical you will use `R` [@R-base] as well as `nimble` [@nimble] to carry out a spatial and a spatio-temporal small area disease risk analysis. This dataset was first analysed in [@dhokotera2020spatiotemporal].
+In this practical you will use `R` [@R-base] as well as `nimble` [@nimble] to carry out a spatial and a spatio-temporal small area disease risk analysis. This dataset was first analysed in [@dhokotera2020spatiotemporal]. 
 
 In particular, you are going to model yearly cervical cancer (C53.0, C53.1, C53.8 and C53.9) incidence among women diagnosed with HIV in South Africa during 2004-2014.
 
-South Africa (excluding the province of KwaZulu-Natal) is divided into 169 municipalities. KwaZulu-Natal was excluded from the study because it started contributing data in 2010. The data used in this practical is online available at [github](https://github.com/gkonstantinoudis/CervixHIVRSA). (I can add here my paper once I have the medrxiv version uploaded).
+South Africa (excluding the province of KwaZulu-Natal) is divided into 169 municipalities. KwaZulu-Natal was excluded from the study because it started contributing data in 2010. The data used in this practical is online available at [github](https://github.com/gkonstantinoudis/SpatialModelsNIMBLE/tree/main/HIV_InteractionTI). 
 
 ### Before starting the practical
 
