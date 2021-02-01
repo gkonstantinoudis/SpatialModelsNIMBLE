@@ -1,0 +1,599 @@
+---
+title: 'Spatiotemporal analysis of Cervical cancer among HIV positive women in South Africa: type I spatiotemporal interaction'
+author: "Garyfallos Konstantinoudis"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+bibliography: biblio.bib
+---
+
+
+<style type="text/css">
+body{ /* Normal  */
+      font-size: 14px;
+  }
+h1.title {
+  font-size: 30px;
+  color: black;
+  font-weight: bold;
+}
+h1 { /* Header 1 */
+    font-size: 25px;
+  color: black;
+  font-weight: bold;
+}
+h2 { /* Header 2 */
+    font-size: 20px;
+  color: black;
+  font-weight: bold;
+}
+h3 { /* Header 3 */
+    font-size: 15px;
+  color: black;
+  font-weight: bold;
+}
+code.r{ /* Code block */
+    font-size: 14px;
+}
+pre, code {
+    color: 	#1B0F0E;
+  }
+</style>
+
+
+\pagenumbering{gobble} 
+\pagenumbering{arabic} 
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE, fig.align = "center",
+                      fig.width=7, fig.height=4)
+```
+
+
+In this practical you will use `R` [@R-base] as well as `nimble` [@nimble] to carry out a spatial and a spatio-temporal small area disease risk analysis. This dataset was first analysed in [@dhokotera2020spatiotemporal].
+
+In particular, you are going to model yearly cervical cancer (C53.0, C53.1, C53.8 and C53.9) incidence among women diagnosed with HIV in South Africa during 2004-2014.
+
+South Africa (excluding the province of KwaZulu-Natal) is divided into 169 municipalities. KwaZulu-Natal was excluded from the study because it started contributing data in 2010. The data used in this practical is online available at [github](https://github.com/gkonstantinoudis/CervixHIVRSA). (I can add here my paper once I have the medrxiv version uploaded).
+
+### Before starting the practical
+
+* Load needed libraries:
+```{r echo=TRUE, eval = TRUE, message=FALSE}
+library(dplyr)        # A package for data manipulation
+library(sf)           # Simple feature for R
+library(spdep)        # Functions and tests for evaluating spatial patterns 
+                      # and autocorrelation
+library(tidyr)
+
+library(nimble)       # A package for running nimble from R
+library(ggmcmc)       # A package for plotting and viewing of MCMC output
+library(coda)         # A package for summarizing and plotting of MCMC output 
+                      # and diagnostic tests
+
+library(ggplot2)      # A package that implements the grammar of graphics, which is a term used to
+                      # break up graphs into semantic components, such as geometries and layers.
+library(viridis)      # A package providing color palettes 
+library(patchwork)
+
+# For tables in RMarkdown
+library(knitr)
+library(kableExtra)
+```
+
+* To install the entire suite of packages, we can use:
+```{r eval = FALSE,  results="hide"}
+install.packages(c("sf", "dplyr", "tidyr", "nimble", "coda", "spdep", "patchwork", "ggplot2",
+                   "GGally", "ggmcmc", "viridis", "patchwork", "knitr", "kableExtra"), dependencies = TRUE, repos = "http://cran.r-project.org")
+```
+
+### Data
+
+1. Import the`.rds` file with the data and call the data.frame object as *CC_HIV*. Import also the `.shp` and call it `RSA_shp`.
+
+```{r eval=TRUE, echo=TRUE, message=FALSE}
+CC_HIV <- readRDS("data_DataSouthAfrica")
+head(CC_HIV)
+
+RSA_shp <- read_sf("ShapeSA_mun.shp")
+```
+Here The first column labeled `year` is the year of the diagnosis, `CCcases` is the number of cervical cancer cases, `HIVcases` is the number of women diagnosed with HIV, `PROVINCE` gives the acronym of the province where the cases is diagnosed, `ID` is a municipality ID and `age` gives us the age group.
+
+### Indirect standardization
+
+2. Perform an indirect standardization for age. 
+
+```{r eval=TRUE, echo=TRUE, message=FALSE}
+
+CC_HIV %>% group_by(age) %>% 
+           mutate(agerates = sum(CCcases)/sum(HIVcases)) %>% 
+           ungroup() %>% 
+           mutate(HIVtimesRates = agerates*HIVcases) %>% 
+           group_by(year, ID) %>% 
+           summarize(CCcases = sum(CCcases), HIV_expected = sum(HIVtimesRates)) -> CC_HIV
+
+```
+
+3. Check if the total number of CC cases and expected cases are identical
+
+```{r eval=TRUE, echo=TRUE, message=FALSE}
+
+sum(CC_HIV$HIV_expected) - sum(CC_HIV$CCcases)
+
+```
+
+4. Do a scatterplot of the observed and expected cases.
+
+```{r eval=TRUE, fig.width=5, fig.height=4}
+
+ggplot() + geom_point(data = CC_HIV, aes(x = CCcases, y = HIV_expected)) + 
+  theme_bw() + ylim(c(0, 400)) + xlim(c(0, 400)) + geom_abline(slope = 1, col = "red")
+
+```
+
+### Exploratory analysis
+
+5. Calculate the crude standardized incidence ratio per municipality and year and add it as a new column `crudeSIR` in the `CC_HIV` dataset.
+
+```{r eval=TRUE, echo=TRUE, message=FALSE}
+
+CC_HIV %>% mutate(crudeSIR = CCcases/HIV_expected) -> CC_HIV
+
+```
+
+6. Create two plots for the crudeSIR: a. The spaghetti plot that shows time on the x axis, crudeSIR on the y axis and the different lines stand for the different municipalities, b. Maps of the quintiles of crudeSIR per year with a seperate category for 0s.
+
+
+```{r echo=TRUE, eval=TRUE}
+# a. The spaghetti plot
+ggplot() + geom_line(data = CC_HIV, aes(x = year, y = crudeSIR, group = ID, col = ID)) +
+  scale_color_viridis_c() + theme_bw()
+
+```
+
+
+```{r echo=TRUE, eval=TRUE, fig.height=30, fig.width=50}
+# b. The maps
+
+listplot <- list()
+
+for(i in 2004:2014){
+
+  CC_HIV %>% filter(year == i) %>% 
+  left_join(RSA_shp, ., by = c("ID" = "ID")) %>% 
+  select(ID, crudeSIR) %>% 
+  rename(!!paste0("crudeSIR", i) := crudeSIR) -> listplot[[c(i-2003)]]
+  
+}
+
+
+do.call(cbind, lapply(listplot, function(X){
+  X <- as.data.frame(X)
+  X$geometry <- NULL
+  return(X[,2])
+  }
+ )
+) %>% as.data.frame() %>% 
+  cbind(listplot[[1]]$ID,.) -> tmp
+                    
+colnames(tmp) <- c("ID", paste0("crudeSIR", 2004:2014))
+
+
+apply(tmp[,-1], 2, function(X){
+  Y <- X
+  Y[X == 0] <- "Q0"
+  Y[X != 0] <- as.character(
+  cut(X[X!=0], breaks = quantile(X[X!=0], 
+      probs = seq(from = 0, to = 1, length.out = 6)), 
+      labels = paste0('Q', 1:5), 
+      include.lowest = TRUE)
+  )
+  Y <- as.factor(Y)
+  return(Y)
+}
+) -> tmp[,-1]
+
+
+RSA_crudemaps <- left_join(RSA_shp, tmp, by = c("ID" = "ID"))
+
+listgg <- list()
+
+for(i in 2004:2014){
+  
+  ggplot() + geom_sf(data = RSA_crudemaps, 
+                     aes_string(fill = paste0("crudeSIR", i)), col = NA) +
+  scale_fill_viridis_d(name = "") + 
+  theme_bw() + ggtitle(paste0("crudeSIR", i)) + 
+  theme(text = element_text(size = 50))-> 
+  listgg[[c(i-2003)]] 
+  
+}
+
+(listgg[[1]]|listgg[[2]]|listgg[[3]]|listgg[[4]])/
+  (listgg[[5]]|listgg[[6]]|listgg[[7]]|listgg[[8]])/
+  (listgg[[9]]|listgg[[10]]|listgg[[11]])
+
+```
+
+### Model specification
+
+7. Write a model in `nimble` were you include spatially and temporally structured and unstructured components.
+
+```{r}
+
+st_typeI_BYMmodel <- nimbleCode(
+{
+  for (i in 1:N) 
+    {
+    for(t in 1:Temporal)
+      {
+          
+      O[i,t]  ~ dpois(mu[i,t])
+      log(mu[i,t]) <- log(E[i,t]) + alpha + theta[i] + phi[i] + gamma[t] + xi[t] + zeta[i, t]
+      
+      zeta[i, t] ~ dnorm(0, tau.zeta)
+      gamma[t] ~ dnorm(0,tau.gamma) 
+    }
+    
+      theta[i] ~ dnorm(0,tau.theta)                 
+    }
+  
+
+# intrinsic CAR prior on temporal random effects
+  xi[1:Temporal] ~ dcar_normal(adj.tm[1:K], weights.tm[1:K], num.tm[1:Temporal], tau.xi, zero_mean = 1)
+  
+# intrinsic CAR prior on spatial random effects
+  phi[1:N] ~ dcar_normal(adj[1:L], weights[1:L], num[1:N], tau.phi, zero_mean = 1)
+  
+
+# priors
+  alpha  ~ dflat()                    
+  overallRR <- exp(alpha)             
+    
+  # temporal field
+  tau.gamma~ dgamma(1,0.001)          
+  sigma2.gamma <- 1/tau.gamma         
+  
+  tau.xi ~ dgamma(0.5,0.005)          
+  sigma2.xi <- 1/tau.xi               
+  
+  # spatial field
+  tau.theta ~ dgamma(1,0.001)         
+  sigma2.theta <- 1/tau.theta         
+  
+  tau.phi ~ dgamma(0.5,0.005)         
+  sigma2.phi <- 1/tau.phi             
+  
+  # spatiotemporal field
+  tau.zeta ~ dgamma(1,0.001)          
+  sigma2.zeta <- 1/tau.zeta           
+}
+)
+
+```
+
+8. Define the spatial weight matrix
+
+```{r}
+
+RSA_nb <- poly2nb(RSA_shp)
+nbWB <- nb2WB(nb = RSA_nb)
+
+```
+
+9. Define the temporal weight matrix
+
+```{r eval=TRUE, echo=TRUE, include=TRUE}
+
+# For the random walk 1 we can do something similar
+Temporal <- length(unique(CC_HIV$year))
+W <- matrix(0, nrow = Temporal, ncol = Temporal)
+
+for(i in 1:(Temporal-1)) W[i,i+1] <- 1
+for(i in 1:(Temporal-1)) W[i+1,i] <- 1
+
+Wnb_temporal <- mat2listw(W)
+Wnb_temporal <- nb2WB(nb = Wnb_temporal$neighbours)
+
+```
+
+10. Create matrices of the observed and expected number of cervical cancers where each column is a different year and each row a different municipality. 
+
+```{r}
+
+# prepare observed data
+Observed <- spread(CC_HIV[,c("year", "ID", "CCcases")], year, CCcases)
+Observed <- as.matrix(Observed[,-1])
+
+# prepare expected data
+Expected <- spread(CC_HIV[,c("year", "ID", "HIV_expected")], year, HIV_expected)
+Expected <- as.matrix(Expected[,-1])
+
+```
+
+11. Set the data and the constants.
+
+```{r eval=TRUE, echo=TRUE, include=TRUE}
+
+N <- nrow(Observed)
+
+CCdata = list(
+                 O = Observed                           
+)      
+      
+CCConsts <-list(      
+                 N = N,                                  
+                 # space
+                 L = length(nbWB$weights),               
+                 E = Expected,                           
+                 adj = nbWB$adj,                         
+                 num = nbWB$num, 
+                 weights = nbWB$weights, 
+                 # time
+                 Temporal = Temporal, 
+                 K = length(Wnb_temporal$weights), 
+                 adj.tm = Wnb_temporal$adj, 
+                 num.tm = Wnb_temporal$num, 
+                 weights.tm = Wnb_temporal$weights
+)
+
+```
+
+12. Define the initial values.
+
+```{r eval=TRUE, echo=TRUE}
+
+inits <- list(
+  list(alpha = 1,
+       tau.theta = 10,
+       tau.phi = 1,
+       tau.xi = 8, 
+       tau.gamma = 5,
+       tau.zeta = 5,
+       theta = rep(0.02, times = N), 
+       phi = c(rep(0.2, times = N)), 
+       gamma = rep(0.02, times = Temporal),
+       xi = c(rep(0.2, times = Temporal)), 
+       zeta = matrix(0.2, nrow = N, ncol = Temporal)
+       ),
+  list(alpha = 0.5,
+       tau.theta = 1,
+       tau.phi = 0.1,
+       tau.xi = 0.8, 
+       tau.gamma = 0.5,
+       tau.zeta = 1, 
+       theta = rep(0.05, times = N),
+       phi = c(rep(-0.05, times = N)), 
+       gamma = rep(-0.02, times = Temporal),
+       xi = c(rep(-0.2, times = Temporal)), 
+       zeta = matrix(-0.2, nrow = N, ncol = Temporal)
+       )
+)
+
+```
+
+13. Define the monitors. Monitor the overall relative risk, all the variance hyperparameters and all the random effects.
+
+```{r eval=TRUE, echo=TRUE}
+params <- c("overallRR", "sigma2.phi",
+            "sigma2.theta", "phi", "theta", "xi", "gamma",
+            "sigma2.gamma", "sigma2.xi", "mu",
+            "sigma2.zeta", "zeta")
+```
+
+14. Specify the MCMC setting
+
+```{r eval=TRUE, echo=TRUE, include=TRUE}
+# MCMC setting
+ni <- 50000  # nb iterations 
+nt <- 5      # thinning interval
+nb <- 10000  # nb iterations as burn-in 
+nc <- 2      # nb chains
+```
+
+15. Call the `nimleMCMC()` function. (Takes 12 minutes, if you specify the setting as did on the tutorial)
+
+```{r eval=FALSE, echo=TRUE}
+
+t_0 <- Sys.time()
+st_typeI_BYM.model <- nimbleMCMC(code = st_typeI_BYMmodel,
+                      data = CCdata,
+                      constants = CCConsts, 
+                      inits = inits,
+                      monitors = params,
+                      niter = ni,
+                      nburnin = nb,
+                      thin = nt, 
+                      nchains = nc, 
+                      setSeed = 9, 
+                      progressBar = TRUE, 
+                      samplesAsCodaMCMC = TRUE, 
+                      summary = TRUE, 
+                      WAIC = TRUE
+                      )
+t_1 <- Sys.time()
+t_1 - t_0
+
+```
+
+```{r eval=TRUE, echo=FALSE, include=FALSE}
+
+# saveRDS(st_typeI_BYM.model, file = "st_typeI_BYM.model")
+st_typeI_BYM.model <- readRDS("st_typeI_BYM.model")
+
+```
+
+
+### Convergence diagnostics
+
+
+16. Plot the traceplots for the intercept and the four variances
+
+```{r eval=TRUE, echo=TRUE, fig.height = 12, fig.width=10}
+
+ggs_stBYM.model <- ggs(st_typeI_BYM.model$samples)
+
+
+ggs_stBYM.model %>% filter(Parameter %in% c("overallRR", "sigma2.theta","sigma2.phi", "sigma2.gamma", "sigma2.xi", "sigma2.zeta")) %>% 
+  ggs_traceplot() + theme_bw()
+
+```
+
+17. Calculate the Gelman and Rubin diagnostic and check the convergence of the random effects. Which of those havent converged yet? What can you do?
+
+```{r eval=FALSE, echo=TRUE}
+
+GR.diag <- gelman.diag(st_typeI_BYM.model$samples, multivariate = FALSE)
+
+all(GR.diag$psrf[startsWith(rownames(GR.diag$psrf), c("gamma")),"Point est."] < 1.1)
+all(GR.diag$psrf[startsWith(rownames(GR.diag$psrf), c("theta")),"Point est."] <1.1)
+all(GR.diag$psrf[startsWith(rownames(GR.diag$psrf), c("phi")),"Point est."] < 1.1)
+all(GR.diag$psrf[startsWith(rownames(GR.diag$psrf), c("xi")),"Point est."] <1.1)
+all(GR.diag$psrf[startsWith(rownames(GR.diag$psrf), c("zeta")),"Point est."]<1.1)
+
+```
+$\theta$ and $\phi$ havent converged yet, nevertheless we should not assess their convergence independently but rather the convergence of their sum, since they are not identifiable. 
+
+
+### Results
+
+
+18. Plot the median of the temporal trend ($\exp(\gamma + \xi)$) on the y axis and the years on the x-axis. Extra: Add the 95%CrI on the plot.
+
+```{r PlotTime, eval=TRUE, echo=TRUE, fig.cap="Posterior medians of the temporal trends; the shaded area stands for the 95% credible intervals", fig.width=5, fig.height=3}
+
+dat.tre <- data.frame(
+  year = 2004:2014,
+  median = exp(st_typeI_BYM.model$summary$all.chains[paste0("gamma[",1:11, "]"),"Median"] + st_typeI_BYM.model$summary$all.chains[paste0("xi[",1:11, "]"),"Median"]), 
+  LL = exp(st_typeI_BYM.model$summary$all.chains[paste0("gamma[",1:11, "]"), "95%CI_low"] + st_typeI_BYM.model$summary$all.chains[paste0("xi[",1:11, "]"),"95%CI_low"]), 
+  UL = exp(st_typeI_BYM.model$summary$all.chains[paste0("gamma[",1:11, "]"), "95%CI_upp"] + st_typeI_BYM.model$summary$all.chains[paste0("xi[",1:11, "]"),"95%CI_upp"])
+)
+  
+
+ggplot(data = dat.tre) + 
+  geom_ribbon(aes(x = year, ymin = LL, ymax = UL), fill = viridis(1), alpha = .1) + 
+  geom_line(aes(x = year, y = median), col = viridis(1)) + 
+  geom_point(aes(x = year, y = median), col = viridis(1), size = 1.5) + 
+  ylim(c(0, 2)) + 
+  ylab("Temporal relative risk") +
+  theme_bw() +
+  theme( text = element_text(size=12))
+
+```
+
+19. Plot the median of the spatial trend ($\exp(\theta + \phi)$) on a map
+
+```{r eval=TRUE, echo=TRUE, fig.cap="Posterior median of the spatial trends", fig.width=6, fig.height=4}
+
+dat.sre <- data.frame(
+  ID = RSA_shp$ID,
+  median = exp(st_typeI_BYM.model$summary$all.chains[paste0("theta[",1:169, "]"),"Median"] + st_typeI_BYM.model$summary$all.chains[paste0("phi[",1:169, "]"),"Median"])
+)
+  
+dat.sre <- left_join(RSA_shp, dat.sre, by = c("ID" = "ID"))
+
+ggplot() + 
+  geom_sf(data = dat.sre, aes(fill = median), col = NA) + 
+  scale_fill_viridis_c(name = "") +
+  ggtitle("Median Spatial Relative Risk") +
+  theme_bw() +
+  theme(text = element_text(size=12))
+
+```
+
+20. Redo the plots you did for question 6, now using the spatiotemporal relative risk ($\exp(\zeta)$). You do not need to create and extra category for the 0s here.
+
+```{r echo=TRUE, eval=TRUE}
+dat.stre <- data.frame(
+  year = CC_HIV$year, ID = CC_HIV$ID, 
+  STRR = exp(st_typeI_BYM.model$summary$all.chains[startsWith(rownames(st_typeI_BYM.model$summary$all.chains), "zeta"),"Median"]) 
+  )
+
+# a. The spaghetti plot
+ggplot() + geom_line(data = dat.stre, aes(x = year, y = STRR, group = ID, col = ID)) +
+  scale_color_viridis_c() + theme_bw()
+
+```
+
+
+```{r echo=TRUE, eval=TRUE, fig.height=30, fig.width=50}
+# b. The maps
+
+listgg <- list()
+
+dat.stre$year <- as.numeric(dat.stre$year)
+
+for(i in 2004:2014){
+  
+  dat.stre %>% filter(year == i) %>% left_join(RSA_shp,. , by = c("ID" = "ID")) %>% 
+    mutate(STRRq = cut(STRR, 
+                       breaks = quantile(STRR, probs = seq(from = 0, to = 1, length.out = 6)), 
+                       label = paste0("Q", 1:5), 
+                       include.lowest = TRUE)
+           ) %>% 
+  
+  
+  ggplot() + geom_sf(aes(fill = STRRq), col = NA) +
+  scale_fill_viridis_d(name = "") + 
+  theme_bw() + ggtitle(paste0("Spatiotemporal RR", i)) + 
+  theme(text = element_text(size = 50))-> 
+  listgg[[c(i-2003)]] 
+  
+}
+
+(listgg[[1]]|listgg[[2]]|listgg[[3]]|listgg[[4]])/
+  (listgg[[5]]|listgg[[6]]|listgg[[7]]|listgg[[8]])/
+  (listgg[[9]]|listgg[[10]]|listgg[[11]])
+
+```
+
+21. What do you need to plot to get results comparable with question 6?
+
+We will need to plot the smoothed SIRs, ie. the $\text{SIR}_{it} = exp(\alpha + \theta_{i} + \phi_{i} + \xi_t + \gamma_t + \zeta_{it})$.
+
+22. Do a table of the median and 95%CrI of the variance hyperparameters and comment.
+
+```{r eval=TRUE, echo=TRUE}
+
+dat.hyper <- 
+  round(
+  data.frame(median = 
+               c(
+    st_typeI_BYM.model$summary$all.chains[paste0("sigma2.theta"),"Median"], 
+    st_typeI_BYM.model$summary$all.chains[paste0("sigma2.phi"),"Median"], 
+    st_typeI_BYM.model$summary$all.chains[paste0("sigma2.gamma"),"Median"], 
+    st_typeI_BYM.model$summary$all.chains[paste0("sigma2.xi"),"Median"],
+    st_typeI_BYM.model$summary$all.chains[paste0("sigma2.zeta"),"Median"]
+    ),
+    LL = 
+               c(
+    st_typeI_BYM.model$summary$all.chains[paste0("sigma2.theta"),"95%CI_low"], 
+    st_typeI_BYM.model$summary$all.chains[paste0("sigma2.phi"),"95%CI_low"], 
+    st_typeI_BYM.model$summary$all.chains[paste0("sigma2.gamma"),"95%CI_low"], 
+    st_typeI_BYM.model$summary$all.chains[paste0("sigma2.xi"),"95%CI_low"], 
+    st_typeI_BYM.model$summary$all.chains[paste0("sigma2.zeta"),"95%CI_low"]
+    ), 
+    UL = 
+              c(
+    st_typeI_BYM.model$summary$all.chains[paste0("sigma2.theta"),"95%CI_upp"], 
+    st_typeI_BYM.model$summary$all.chains[paste0("sigma2.phi"),"95%CI_upp"], 
+    st_typeI_BYM.model$summary$all.chains[paste0("sigma2.gamma"),"95%CI_upp"], 
+    st_typeI_BYM.model$summary$all.chains[paste0("sigma2.xi"),"95%CI_upp"], 
+    st_typeI_BYM.model$summary$all.chains[paste0("sigma2.zeta"),"95%CI_upp"]
+    )),
+  digits = 3)
+
+row.names(dat.hyper) <- 
+  c("sigma2.theta", "sigma2.phi", "sigma2.gamma", "sigma2.xi", "sigma2.zeta")
+
+knitr::kable(dat.hyper, caption = "Posterior median and 95% CrI of the variance hyperparameters.") %>%  kable_styling(bootstrap_options = "striped", full_width = F, position = "center")
+
+```
+
+It seems that the spatial autocorrelation component captures the highest variance. The spatiotemporal interaction term is the second. The unstructured temporal random effect does not seem to capture much, if any, temporal variation. 
+
+
+### References
