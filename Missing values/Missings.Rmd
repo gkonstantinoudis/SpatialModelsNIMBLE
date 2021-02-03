@@ -1,0 +1,810 @@
+---
+title: "Temperature and mortality in Chicago: Dealing with missing values"
+author: "Garyfallos Konstantinoudis"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+bibliography: biblio.bib
+---
+
+
+<style type="text/css">
+body{ /* Normal  */
+      font-size: 14px;
+  }
+h1.title {
+  font-size: 30px;
+  color: black;
+  font-weight: bold;
+}
+h1 { /* Header 1 */
+    font-size: 25px;
+  color: black;
+  font-weight: bold;
+}
+h2 { /* Header 2 */
+    font-size: 20px;
+  color: black;
+  font-weight: bold;
+}
+h3 { /* Header 3 */
+    font-size: 15px;
+  color: black;
+  font-weight: bold;
+}
+code.r{ /* Code block */
+    font-size: 14px;
+}
+pre, code {
+    color: 	#1B0F0E;
+  }
+</style>
+
+
+\pagenumbering{gobble} 
+\pagenumbering{arabic} 
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE, fig.align = "center")
+```
+
+In this document we will show how to deal with missing values in a Bayesian framework using `NIMBLE` [@nimble]. We will use the Chicago dataset as it can be found in the `dlnm` package. Using typing `help(chicagoNMMAPS)` you will find the following information about the dataset:
+
+The data set contains daily mortality (all causes, CVD, respiratory), weather (temperature, dew point temperature, relative humidity) and pollution data (PM10 and ozone) for Chicago in the period 1987-2000 from the National Morbidity, Mortality and Air Pollution Study (NMMAPS).
+
+The purpose of the tutorial is to assess the effect of temperature on the number of deaths of all causes, using the Chicago dataset. At this analysis we are not interested in modelling the lag effect.
+
+## Install and load packages 
+
+This practical requires the following packages to be installed and attached: `sf`, `dplyr`, `tidyverse`,  `nimble`, `coda`, `spdep`, `patchwork`, `GGally`, `ggmcmc`, `kableExtra`, `splines2` and `dlnm`. 
+
+* To install the entire suite of packages, we can use:
+```{r eval = FALSE,  results="hide"}
+install.packages(c("sf", "dplyr", "tidyverse", "nimble", "coda", "spdep", "patchwork", 
+                   "GGally", "ggmcmc", "dlnm", "splines2", "kableExtra"), dependencies = TRUE, repos = "http://cran.r-project.org")
+```
+
+
+* Then, load the needed packages:
+```{r eval = TRUE, results="hide", message=FALSE, warning=FALSE}
+library(sf)           # Simple feature for R
+library(dplyr)        # A package for data manipulation
+library(tidyverse)    # A package for data manipulation and plotting
+library(nimble)       # A package for performing MCMC in R
+library(coda)         # A package for summarizing and plotting of MCMC output 
+                      # and diagnostic tests
+library(spdep)        # A package to calculate neighbors
+library(patchwork)    # A package to combine plots
+library(GGally)       # A package to do pairplots
+library(ggmcmc)       # MCMC diagnostics with ggplot
+library(dlnm)         # A package for performing dlnms in R
+library(splines2)     # A package to fit splines in R
+library(kableExtra)   # packages for formatting tables in rmarkdown
+library(fastDummies)  # Library to create dummies from a string
+```
+
+
+
+## Import and explore the Chicago dataset
+
+* Import the health data
+```{r eval=TRUE}
+head(chicagoNMMAPS, 10)
+```
+
+Please notice the missing values. 
+
+* Calculate the number of missing values per row
+```{r eval=TRUE}
+summary(chicagoNMMAPS)
+```
+
+There are 1096 missing values for the mean daily relative humidity and 251 for PM$_10$.
+
+## Complete cases analysis
+
+### The model
+
+We are fitting a model with a Poisson as the likelihood defined as:
+\[
+\begin{eqnarray}
+O_{t} & \sim & \text{Poisson}(\lambda_{t})  \\
+\log(\lambda_{t}) & = & \alpha + \sum_j \beta_j\text{dow}_j + \gamma\text{PM}_t + \xi_t + w_t  \\
+\xi_t, w_t & \sim & RW1(\tau^{-1}) \\
+\alpha, {\bf \beta}, \gamma & \sim & N(0, 10) \\
+1/\tau & \sim & \text{Gamma}(1,1) 
+\end{eqnarray}
+\]
+
+where $\alpha$ is an intercept term, $\beta_j$ covariates for the effect of the days, $\gamma$ a linear term for PM, $\xi_t$ a temporal trend, and $w_t$ a smooth function for the effect of temperature.
+
+### The code
+
+* Nimble model
+```{r eval=TRUE}
+
+CompleteCase.code <- nimbleCode(
+  {
+    for (t in 1:Total){
+      
+      O[t] ~ dpois(mu[t])                               
+      log(mu[t]) <- alpha + inprod(beta[1:6], X[t, 1:6]) + gamma*PM[t] + xi[time_cat[t]] + 
+        w[tmp.ord[t]]
+  
+    } 
+    
+   # intrinsic CAR prior on the effect of time
+   xi[1:N] ~ dcar_normal(adj2[1:M], weights2[1:M], num2[1:N], tau.xi, c = 2, zero_mean = 1)
+   
+   # intrinsic CAR prior on the effect of temperature
+   w[1:K] ~ dcar_normal(adj[1:L], weights[1:L], num[1:K], tau.w, c = 2, zero_mean = 1)
+    
+    # Priors:
+    alpha ~ dflat()                                      # Unif(-inf, +inf)
+    exp.alpha <- exp(alpha)                              # overall counts across time period
+    
+    for(j in 1:6){
+	    beta[j] ~ dnorm(0, tau = 5)
+      exp.beta[j] <- exp(beta[j])                        # the coefficients of the splines
+    }
+    
+    gamma ~ dnorm(0, tau = 5)
+    exp.gamma <- exp(gamma)
+    
+    # the priors are informative to help smoothing
+    tau.xi <- 1/sigma2.xi
+    sigma2.xi ~ dgamma(1,0.5)
+    
+    tau.w <- 1/sigma2.w
+    sigma2.w ~ dgamma(1,1)
+  }
+)
+
+```
+
+* Define a new data frame without the PM missings
+```{r}
+
+dat.complete.case <- chicagoNMMAPS[!is.na(chicagoNMMAPS$pm10),]
+dat.complete.case <- dat.complete.case[order(dat.complete.case$time),]
+dat.complete.case$time <- 1:nrow(dat.complete.case)
+
+dat.complete.case$time_cat <- cut(
+  dat.complete.case$time, 
+  breaks = seq(from = min(dat.complete.case$time), 
+               to  = max(dat.complete.case$time), 
+               length.out = 700), # a weekly term
+  labels = 1:699,
+  include.lowest = TRUE
+)
+
+dat.complete.case$time_cat <-
+  as.numeric(droplevels(dat.complete.case$time_cat))
+
+dat.complete.case <- dat.complete.case[order(dat.complete.case$time_cat),]
+
+```
+
+* Define the ordered variable for RW.
+```{r}
+
+dat.complete.case$temp_cat <- cut(
+  dat.complete.case$temp, 
+  breaks = seq(from = min(dat.complete.case$temp), 
+               to  = max(dat.complete.case$temp), 
+               length.out = 100),
+  labels = 1:99,
+  include.lowest = TRUE
+)
+
+dat.complete.case$temp_cat_order <-
+  as.numeric(droplevels(dat.complete.case$temp_cat))
+
+dat.complete.case <- dat.complete.case[order(dat.complete.case$temp_cat_order),]
+
+
+```
+
+* Define the weights for the covariance matrix. 
+```{r}
+
+RW2 <- function(k){
+  
+    rest.comp <- list()
+    for(i in 3:(k-2)){
+      rest.comp[[i]] <- c(i-2, i-1, i+1, i+2)
+    }
+    rest.comp <- unlist(rest.comp)
+    
+    adj = c(2, 3, 1, 3, 4, 
+            rest.comp, 
+            c(k-3, k-2, k, k-2, k-1)
+            )
+    
+    num = c(2, 3, rep(4, times = c(k-4)), 3, 2)
+    
+    weights = c(c(2, -1, 2, 4, -1), 
+                rep(c(-1, 4, 4, -1), times = c(k-4)),
+                c(-1, 4, 2, -1, 2))
+    
+    retlist <- list()
+    retlist$adj <- adj
+    retlist$num <- num
+    retlist$weights <- weights
+    return(retlist)
+    
+}
+
+# temperature
+K <- max(dat.complete.case$temp_cat_order)
+Wnb <- RW2(K)
+
+# time
+N <- max(dat.complete.case$time_cat)
+Wnb2 <- RW2(N)
+
+```
+
+* Data objects:
+```{r eval=TRUE}
+
+# Format the data for NIMBLE in a list
+ChicagoData = list(
+                 O = dat.complete.case$death, 
+                 X = as.matrix(fastDummies::dummy_cols(dat.complete.case$dow)[,-c(1:2)]), 
+                 PM = scale(dat.complete.case$pm10)[,1]
+)
+
+ChicagoConsts <-list(
+                 N = N,  
+                 M = length(Wnb2$adj),
+                 
+                 K = K,
+                 L = length(Wnb$adj),
+                 
+                 adj = Wnb$adj,                             
+                 num = Wnb$num,
+                 weights = Wnb$weights, 
+                 
+                 adj2 = Wnb2$adj,                             
+                 num2 = Wnb2$num,
+                 weights2 = Wnb2$weights, 
+                 
+                 tmp.ord = dat.complete.case$temp_cat_order, 
+                 time_cat = dat.complete.case$time_cat, 
+                 Total = nrow(dat.complete.case)
+)
+
+  
+```
+
+* Initialize the parameters:
+```{r eval=TRUE}
+
+inits <- list(
+  
+  list(alpha=0.01, 
+       sigma2.w=0.1,
+       sigma2.xi=0.1,
+       xi=rep(0.1, times = N),
+       w=rep(0.1, times = K), 
+       beta=rep(0, times = 6), 
+       gamma=0),
+  
+  list(alpha=1, 
+       sigma2.w=1,
+       sigma2.xi=1,
+       xi=rep(0.5, times = N),
+       w=rep(0.5, times = K), 
+       beta=rep(-1, times = 6), 
+       gamma=2)
+)
+
+```
+
+
+* Set the parameters that will be monitored:
+```{r eval=TRUE}
+params <- c("mu", paste0("exp.beta[", 1:6, "]"), "alpha",
+            "exp.gamma", "xi", "w", "sigma2.xi", "sigma2.w")
+```
+
+* Specify the MCMC setting:
+```{r eval=TRUE}
+# MCMC setting
+ni <- 150000  # nb iterations 
+nt <- 10     # thinning interval
+nb <- 50000   # nb iterations as burn-in 
+nc <- 2      # nb chains
+```
+
+
+* Run the MCMC simulations calling Nimble from R using the function `nimbleMCMC()`. (1.7 hours)
+```{r eval=FALSE}
+t_0 <- Sys.time()
+CompleteCase.model <- nimbleMCMC(code = CompleteCase.code,
+                      data = ChicagoData,
+                      constants = ChicagoConsts, 
+                      inits = inits,
+                      monitors = params,
+                      niter = ni,
+                      nburnin = nb,
+                      thin = nt, 
+                      nchains = nc, 
+                      setSeed = 9, 
+                      progressBar = TRUE,      
+                      samplesAsCodaMCMC = TRUE, 
+                      summary = TRUE, 
+                      WAIC = TRUE
+                      )
+t_1 <- Sys.time()
+time_lcc <- t_1 - t_0
+```
+
+```{r eval=TRUE, echo = FALSE}
+
+# saveRDS(CompleteCase.model, file = "CompleteCase.model")
+CompleteCase.model <- readRDS("CompleteCase.model")
+
+```
+
+### Convergence
+
+* Check convergence
+```{r fig.height=4.5, fig.width=6}
+ggs_mod <- ggs(CompleteCase.model$samples)
+
+ggs_mod %>% filter(Parameter == c("w[10]", "w[9]", "w[24]")) %>% 
+  ggs_traceplot() + theme_bw()
+
+ggs_mod %>% filter(Parameter == c("xi[10]", "xi[90]", "xi[55]")) %>% 
+  ggs_traceplot() + theme_bw()
+
+ggs_mod %>% filter(Parameter == c("sigma2.xi", "sigma2.w")) %>% 
+  ggs_traceplot() + theme_bw()
+
+ggs_mod %>% filter(Parameter == c(paste0("exp.beta[", 1:6, "]"))) %>% 
+  ggs_traceplot() + theme_bw()
+
+ggs_mod %>% filter(Parameter == c("alpha","exp.gamma")) %>% 
+  ggs_traceplot() + theme_bw()
+
+```
+
+### Results
+
+* Extract results (temperature effect)
+```{r fig.height=4, fig.width=6}
+
+tmp_cat = cut(
+  dat.complete.case$temp, 
+  breaks = seq(from = min(dat.complete.case$temp), 
+               to  = max(dat.complete.case$temp), 
+               length.out = 100),
+  labels = seq(from = min(dat.complete.case$temp), 
+               to  = max(dat.complete.case$temp), 
+               length.out = 100)[-1],
+  include.lowest = TRUE
+)
+
+tmp_cat <- droplevels(tmp_cat)
+tmp_cat <- 
+round(as.numeric(as.character(levels(tmp_cat))), digits = 3)
+
+datRW2 = data.frame(temp = tmp_cat, 
+                 median = CompleteCase.model$summary$all.chains[paste0("w[", 1:K, "]"), "Median"],
+                 LL = CompleteCase.model$summary$all.chains[paste0("w[", 1:K, "]"), "95%CI_low"], 
+                 UL = CompleteCase.model$summary$all.chains[paste0("w[", 1:K, "]"), "95%CI_upp"])
+
+ggplot() + geom_line(data = datRW2, aes(x = temp, y = exp(median))) + 
+  geom_line(data = datRW2, aes(x = temp, y = exp(LL)), linetype = 2) + 
+  geom_line(data = datRW2, aes(x = temp, y = exp(UL)), linetype = 2) + 
+  theme_bw() + xlab("Temperature") + ylab("Relative risk") + 
+  geom_hline(yintercept = 1, col = "red", linetype = 2) + 
+  ggtitle("Random walk 2")
+
+```
+
+* Extract results (temporal effect)
+```{r fig.height=4, fig.width=6}
+
+time_cat = cut(
+  dat.complete.case$time, 
+  breaks = seq(from = min(dat.complete.case$time), 
+               to  = max(dat.complete.case$time), 
+               length.out = 700),
+  labels = seq(from = min(dat.complete.case$time), 
+               to  = max(dat.complete.case$time), 
+               length.out = 700)[-1],
+  include.lowest = TRUE
+)
+
+time_cat <- droplevels(time_cat)
+time_cat <- 
+round(as.numeric(as.character(levels(time_cat))), digits = 3)
+
+datRW2 = data.frame(time_cat = time_cat, 
+          median = CompleteCase.model$summary$all.chains[paste0("xi[", 1:N, "]"), "Median"],
+          LL = CompleteCase.model$summary$all.chains[paste0("xi[", 1:N, "]"), "95%CI_low"], 
+          UL = CompleteCase.model$summary$all.chains[paste0("xi[", 1:N, "]"), "95%CI_upp"])
+
+ggplot() + geom_line(data = datRW2, aes(x = time_cat, y = exp(median))) + 
+  geom_line(data = datRW2, aes(x = time_cat, y = exp(LL)), linetype = 2) + 
+  geom_line(data = datRW2, aes(x = time_cat, y = exp(UL)), linetype = 2) + 
+  theme_bw() + xlab("Time") + ylab("Relative risk") + 
+  geom_hline(yintercept = 1, col = "red", linetype = 2) + 
+  ggtitle("Random walk 2")
+
+```
+
+## Imputation
+
+### The model
+
+The model that we will use for imputation is:
+\[
+\begin{eqnarray}
+O_{t} & \sim & \text{Poisson}(\lambda_{t})  \\
+\log(\lambda_{t}) & = & \alpha + \sum_j \beta_j\text{dow}_j + \gamma\text{PM}_t + \xi_t + w_t  \\
+log(\text{PM}_{t}) &\sim& N(\mu_t, \tau_1^{-1}) \\
+\mu_t &=& \alpha_1 + u_t\\
+\xi_t, w_t, u_t & \sim & RW1(\tau^{-1}) \\
+\alpha, {\bf \beta}, \gamma & \sim & N(0, \tau = 5) \\
+\alpha_1 &\sim & N(0, \tau = 0.0001)\\
+\tau^{-1} & \sim & \text{Gamma}(1,1) \\
+\tau_1^{-1} & \sim & \text{Uniform}(0,50)
+\end{eqnarray}
+\]
+
+We will investigate PM a bit more and impute the missings
+```{r}
+summary(chicagoNMMAPS$pm10)
+```
+
+Here we observe that there are several negatives. These are obviously illegal values and thus I would treat as NAs.
+
+```{r}
+chicagoNMMAPS$pm10[chicagoNMMAPS$pm10<0] <- NA
+```
+
+The idea now is to model the log PM and impute it. This can be done in many different ways. Here we will impute based on its temporal trend. One could also think of using the given covariates to inform imputation. 
+
+* Define the data.frame
+```{r}
+
+chicagoNMMAPS$time_cat <- cut(
+  chicagoNMMAPS$time, 
+  breaks = seq(from = min(chicagoNMMAPS$time), 
+               to  = max(chicagoNMMAPS$time), 
+               length.out = 700), # a weekly term
+  labels = 1:699,
+  include.lowest = TRUE
+)
+
+chicagoNMMAPS$time_cat <-
+  as.numeric(droplevels(chicagoNMMAPS$time_cat))
+
+```
+
+* Define the ordered variable for RW.
+```{r}
+
+chicagoNMMAPS$temp_cat <- cut(
+  chicagoNMMAPS$temp, 
+  breaks = seq(from = min(chicagoNMMAPS$temp), 
+               to  = max(chicagoNMMAPS$temp), 
+               length.out = 100),
+  labels = 1:99,
+  include.lowest = TRUE
+)
+
+chicagoNMMAPS$temp_cat_order <-
+  as.numeric(droplevels(chicagoNMMAPS$temp_cat))
+
+chicagoNMMAPS <- chicagoNMMAPS[order(chicagoNMMAPS$temp_cat_order),]
+
+
+```
+
+* Define the weights for the covariance matrix. 
+```{r}
+
+# temperature
+K <- max(chicagoNMMAPS$temp_cat_order)
+Wnb <- RW2(K)
+
+# time
+N <- max(chicagoNMMAPS$time_cat)
+Wnb2 <- RW2(N)
+
+```
+
+
+* Write the model for imputing. 
+```{r eval=TRUE}
+
+Imputation.code <- nimbleCode(
+  {
+    for (t in 1:R){ # R is the total number of rows missings included
+      
+      O[t] ~ dpois(mu[t])                                
+      log(mu[t]) <- alpha + inprod(beta[1:6], X[t,1:6]) + gamma*pm.scaled[t] + xi[time_cat[t]] +
+        w[tmp.ord[t]]
+      
+      log.PM[t] ~ dnorm(log.pm.mean[t], log.pm.prec)
+      log.pm.mean[t] <- alpha.pm + u[time_cat[t]]
+      pm.natscale[t] <- exp(log.PM[t])
+
+    } 
+    
+   pm.scaled[1:R] <- (pm.natscale[1:R] - mean(pm.natscale[1:R]))/sd(pm.natscale[1:R])
+   
+   # intrinsic CAR prior on the effect of time
+   xi[1:N] ~ dcar_normal(adj2[1:M], weights2[1:M], num2[1:N], tau.xi, zero_mean = 1)
+   u[1:N] ~ dcar_normal(adj2[1:M], weights2[1:M], num2[1:N], tau.u, zero_mean = 1)
+   
+   # intrinsic CAR prior on the effect of temperature
+   w[1:K] ~ dcar_normal(adj[1:L], weights[1:L], num[1:K], tau.w, zero_mean = 1)
+    
+   
+   # Priors:
+   # imputation
+   alpha.pm ~ dnorm(0, 0.0001)
+   log.pm.prec <- 1/(sd.pm*sd.pm)
+   sd.pm ~ dunif(0.00001, 50)
+   tau.u <- 1/sigma2.u
+   sigma2.u ~ dgamma(1,0.5)
+   
+   # main model
+   alpha ~ dflat()                                      
+   exp.alpha <- exp(alpha)                              
+   
+   for(k in 1:6){
+	   beta[k] ~ dnorm(0, tau = 5)
+     exp.beta[k] <- exp(beta[k])                        
+   }
+   
+   gamma ~ dnorm(0, tau = 5)
+   exp.gamma <- exp(gamma)
+   
+   # the priors are informative to help smoothing
+   tau.xi <- 1/sigma2.xi
+   sigma2.xi ~ dgamma(1,0.5)
+   
+   tau.w <- 1/sigma2.w
+   sigma2.w ~ dgamma(1,0.5)
+  }
+)
+
+```
+
+
+* Data objects:
+```{r eval=TRUE}
+
+chicagoNMMAPS <- chicagoNMMAPS[order(chicagoNMMAPS$pm10),]
+
+# Format the data for NIMBLE in a list
+ChicagoData = list(
+                 O = chicagoNMMAPS$death, 
+                 X = as.matrix(fastDummies::dummy_cols(chicagoNMMAPS$dow)[,-c(1:2)]), 
+                 log.PM = log(chicagoNMMAPS$pm10)
+)
+
+ChicagoConsts <-list(
+  
+                 N = N,  
+                 M = length(Wnb2$adj),
+                 
+                 K = K,
+                 L = length(Wnb$adj),
+                 
+                 adj = Wnb$adj,                             
+                 num = Wnb$num,
+                 weights = Wnb$weights, 
+                 
+                 adj2 = Wnb2$adj,                             
+                 num2 = Wnb2$num,
+                 weights2 = Wnb2$weights, 
+                 
+                 tmp.ord = chicagoNMMAPS$temp_cat_order, 
+                 time_cat = chicagoNMMAPS$time_cat, 
+                 
+                 R = nrow(chicagoNMMAPS), 
+                 R1 = sum(!is.na(chicagoNMMAPS$pm10))
+                 
+)
+  
+```
+
+* Initialize the parameters:
+```{r eval=TRUE}
+
+inits <- list(
+  
+  list(alpha=0.01, 
+       alpha.pm=log(50),
+       sd.pm=1, 
+       sigma2.u=0.1, 
+       u=rep(0.1, times = N), 
+       sigma2.w=0.1,
+       sigma2.xi=0.1,
+       xi=rep(0.1, times = N),
+       w=rep(0.1, times = K), 
+       beta=rep(0, times = 6), 
+       gamma=0
+       ),
+  
+  list(alpha=1, 
+       alpha.pm=log(100),
+       sd.pm=2, 
+       sigma2.u=1, 
+       u=rep(0.5, times = N),
+       sigma2.w=1,
+       sigma2.xi=1,
+       xi=rep(0.5, times = N),
+       w=rep(0.5, times = K), 
+       beta=rep(-1, times = 6), 
+       gamma=2
+       )
+)
+
+```
+
+
+* Set the parameters that will be monitored:
+```{r eval=TRUE}
+params <- c("mu", paste0("exp.beta[", 1:6, "]"), "alpha",
+            "exp.gamma", "xi", "w", "sigma2.xi", "sigma2.w", 
+            "u", "alpha.pm", "sd.pm", "sigma2.u", "pm.natscale")
+```
+
+* nimble call (1.4 days)
+```{r eval=FALSE}
+t_0 <- Sys.time()
+Imputation.model <- nimbleMCMC(code = Imputation.code,
+                      data = ChicagoData,
+                      constants = ChicagoConsts, 
+                      inits = inits,
+                      monitors = params,
+                      niter = ni,
+                      nburnin = nb,
+                      thin = nt, 
+                      nchains = nc, 
+                      setSeed = 9, 
+                      progressBar = TRUE,      
+                      samplesAsCodaMCMC = TRUE, 
+                      summary = TRUE, 
+                      WAIC = TRUE
+                      )
+t_1 <- Sys.time()
+time_lim <- t_1 - t_0
+```
+
+```{r eval=TRUE, echo = FALSE}
+
+# saveRDS(Imputation.model, file = "Imputation.model")
+Imputation.model <- readRDS("Imputation.model")
+
+```
+
+* Check convergence
+```{r fig.height=4.5, fig.width=6}
+
+Imputation.model_ggs <- ggs(Imputation.model$samples)
+
+Imputation.model_ggs %>% filter(Parameter == c("u[1]", "u[2]", "u[3]")) %>% 
+  ggs_traceplot() + theme_bw()
+
+Imputation.model_ggs %>% filter(Parameter == c("xi[1]", "xi[2]", "xi[3]")) %>% 
+  ggs_traceplot() + theme_bw()
+
+Imputation.model_ggs %>% filter(Parameter == c("w[1]", "w[2]", "w[3]")) %>% 
+  ggs_traceplot() + theme_bw()
+
+Imputation.model_ggs %>% filter(Parameter == c("alpha", "exp.gamma")) %>% 
+  ggs_traceplot() + theme_bw()
+
+Imputation.model_ggs %>% filter(Parameter == c(paste0("exp.beta[", 1:6, "]"))) %>% 
+  ggs_traceplot() + theme_bw()
+
+Imputation.model_ggs %>% filter(Parameter == c("sigma2.xi", "sigma2.w", "sigma2.u")) %>% 
+  ggs_traceplot() + theme_bw()
+
+Imputation.model_ggs %>% filter(Parameter == c("pm.natscale[4859]", "pm.natscale[5000]",
+                                               "pm.natscale[5100]")) %>% 
+  ggs_traceplot() + theme_bw()
+
+
+```
+
+* Extract results (temperature effect)
+```{r fig.height=4, fig.width=6}
+
+tmp_cat = cut(
+  chicagoNMMAPS$temp, 
+  breaks = seq(from = min(chicagoNMMAPS$temp), 
+               to  = max(chicagoNMMAPS$temp), 
+               length.out = 100),
+  labels = seq(from = min(chicagoNMMAPS$temp), 
+               to  = max(chicagoNMMAPS$temp), 
+               length.out = 100)[-1],
+  include.lowest = TRUE
+)
+
+tmp_cat <- droplevels(tmp_cat)
+tmp_cat <- 
+round(as.numeric(as.character(levels(tmp_cat))), digits = 3)
+
+datRW2 = data.frame(temp = tmp_cat, 
+                 median = Imputation.model$summary$all.chains[paste0("w[", 1:K, "]"), "Median"],
+                 LL = Imputation.model$summary$all.chains[paste0("w[", 1:K, "]"), "95%CI_low"], 
+                 UL = Imputation.model$summary$all.chains[paste0("w[", 1:K, "]"), "95%CI_upp"])
+
+ggplot() + geom_line(data = datRW2, aes(x = temp, y = exp(median))) + 
+  geom_line(data = datRW2, aes(x = temp, y = exp(LL)), linetype = 2) + 
+  geom_line(data = datRW2, aes(x = temp, y = exp(UL)), linetype = 2) + 
+  theme_bw() + xlab("Temperature") + ylab("Relative risk") + 
+  geom_hline(yintercept = 1, col = "red", linetype = 2) + 
+  ggtitle("Random walk 2")
+
+```
+
+* Extract results (temporal effect)
+```{r fig.height=4, fig.width=6}
+
+time_cat = cut(
+  chicagoNMMAPS$time, 
+  breaks = seq(from = min(chicagoNMMAPS$time), 
+               to  = max(chicagoNMMAPS$time), 
+               length.out = 700),
+  labels = seq(from = min(chicagoNMMAPS$time), 
+               to  = max(chicagoNMMAPS$time), 
+               length.out = 700)[-1],
+  include.lowest = TRUE
+)
+
+time_cat <- droplevels(time_cat)
+time_cat <- 
+round(as.numeric(as.character(levels(time_cat))), digits = 3)
+
+datRW2 = data.frame(time_cat = time_cat, 
+          median = Imputation.model$summary$all.chains[paste0("xi[", 1:N, "]"), "Median"],
+          LL = Imputation.model$summary$all.chains[paste0("xi[", 1:N, "]"), "95%CI_low"], 
+          UL = Imputation.model$summary$all.chains[paste0("xi[", 1:N, "]"), "95%CI_upp"])
+
+ggplot() + geom_line(data = datRW2, aes(x = time_cat, y = exp(median))) + 
+  geom_line(data = datRW2, aes(x = time_cat, y = exp(LL)), linetype = 2) + 
+  geom_line(data = datRW2, aes(x = time_cat, y = exp(UL)), linetype = 2) + 
+  theme_bw() + xlab("Time") + ylab("Relative risk") + 
+  geom_hline(yintercept = 1, col = "red", linetype = 2) + 
+  ggtitle("Random walk 2")
+
+```
+
+```{r}
+
+tab <- 
+data.frame(
+round(
+(rbind(
+CompleteCase.model$summary$all.chains["exp.gamma", c("Median", "95%CI_low", "95%CI_upp")],
+Imputation.model$summary$all.chains["exp.gamma", c("Median", "95%CI_low", "95%CI_upp")]
+) - 1)*100, digits = 2)
+)
+
+rownames(tab) <- c("Complete cases", "Imputation")
+
+knitr::kable(tab, caption = "Effect of PM") %>%  kable_styling(bootstrap_options = "striped", full_width = F, position = "center")
+```
+
+
+## Conclusion
+
+In this tutorial, we showed an example on how to fit multiple imputation models with nimble. The effect of the imputation in this particular example is negligible in the precision of the results. That is because less that 5% of the observations are missing. In addition, the computational time increases, when we fitted the joined model selected for the imputation (1.5 days).
+
+##  References
+
+
