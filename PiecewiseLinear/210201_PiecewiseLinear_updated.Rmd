@@ -1,0 +1,917 @@
+---
+title: "Temperature and mortality in Chicago: Piecewise linear analysis"
+author: "Garyfallos Konstantinoudis"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+bibliography: biblio.bib
+---
+
+
+<style type="text/css">
+body{ /* Normal  */
+      font-size: 14px;
+  }
+h1.title {
+  font-size: 30px;
+  color: black;
+  font-weight: bold;
+}
+h1 { /* Header 1 */
+    font-size: 25px;
+  color: black;
+  font-weight: bold;
+}
+h2 { /* Header 2 */
+    font-size: 20px;
+  color: black;
+  font-weight: bold;
+}
+h3 { /* Header 3 */
+    font-size: 15px;
+  color: black;
+  font-weight: bold;
+}
+code.r{ /* Code block */
+    font-size: 14px;
+}
+pre, code {
+    color: 	#1B0F0E;
+  }
+</style>
+
+
+\pagenumbering{gobble} 
+\pagenumbering{arabic} 
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE, fig.align = "center")
+```
+
+In this document we will show how to fit piecewise linear models in a Bayesian framework using `NIMBLE` [@nimble]. We will use the Chicago dataset as it can be found in the `dlnm` package. Using typing `help(chicagoNMMAPS)` you will find the following information about the dataset:
+
+The data set contains daily mortality (all causes, CVD, respiratory), weather (temperature, dew point temperature, relative humidity) and pollution data (PM10 and ozone) for Chicago in the period 1987-2000 from the National Morbidity, Mortality and Air Pollution Study (NMMAPS).
+
+The purpose of the tutorial is to assess the effect of temperature on the number of deaths of all causes, using the Chicago dataset. At this analysis we are not interested in modelling the lag effect.
+
+## Install and load packages 
+
+This practical requires the following packages to be installed and attached: `sf`, `dplyr`, `tidyverse`,  `nimble`, `coda`, `spdep`, `patchwork`, `GGally`, `ggmcmc`, `kableExtra`, `splines2` and `dlnm`. 
+
+* To install the entire suite of packages, we can use:
+```{r eval = FALSE,  results="hide"}
+install.packages(c("sf", "dplyr", "tidyverse", "nimble", "coda", "spdep", "patchwork", 
+                   "GGally", "ggmcmc", "dlnm", "splines2", "kableExtra"), dependencies = TRUE, repos = "http://cran.r-project.org")
+```
+
+
+* Then, load the needed packages:
+```{r eval = TRUE, results="hide", message=FALSE, warning=FALSE}
+library(sf)           # Simple feature for R
+library(dplyr)        # A package for data manipulation
+library(tidyverse)    # A package for data manipulation and plotting
+library(nimble)       # A package for performing MCMC in R
+library(coda)         # A package for summarizing and plotting of MCMC output 
+                      # and diagnostic tests
+library(spdep)        # A package to calculate neighbors
+library(patchwork)    # A package to combine plots
+library(GGally)       # A package to do pairplots
+library(ggmcmc)       # MCMC diagnostics with ggplot
+library(dlnm)         # A package for performing dlnms in R
+library(splines2)     # A package to fit splines in R
+library(kableExtra)   # packages for formatting tables in rmarkdown
+library(fastDummies)  # Library to create dummies from a string
+library(parallel)     # Library for parallel computing
+```
+
+
+
+## Import and explore the Chicago dataset
+
+* Import the health data
+```{r eval=TRUE}
+head(chicagoNMMAPS, 10)
+```
+
+
+## Piecewise linear analysis
+
+### The model
+
+We are fitting a model with a Poisson as the likelihood defined as:
+\[
+\begin{eqnarray}
+O_{t} & \sim & \text{Poisson}(\lambda_{t})  \\
+\log(\lambda_{t}) & = & \alpha + \sum_j \beta_j\text{dow}_{j} + \beta_{\text{temp}1}x_t(x_t - c)I(x_t\leq c) + \beta_{\text{temp2}}(x_t - c)I(x_t>c) + \gamma\text{PM}_t + \xi_t \\
+\xi_t & \sim & RW2(\tau^{-1}) \\
+\alpha, {\pmb \beta},{\pmb \beta_{\text{temp}}}, \gamma & \sim & N(0, \kappa) \\
+1/\tau & \sim & \text{Gamma}(1,1) 
+\end{eqnarray}
+\]
+
+where $\alpha$ is an intercept term, $\beta_j$ covariates for the effect of the days, $\gamma$ a linear term for PM and $\xi_t$ a temporal trend. In this parametrization, $\alpha - c\beta_{\text{temp}1}$ and $\beta_{\text{temp}1}$ are the intercept and slope of the first line, whereas $\alpha - c\beta_{\text{temp}2}$ and $\beta_{\text{temp}2}$ the intercept and slope of the second line. The challenging part of such analyses is to specify this threshold. 
+
+
+In this tutorial, we will select thresholds in two ways and compare results. The first is by selecting the model with the threshold that minimises the WAIC, whereas the second is to treat the threshold as a random variable and calculate it accordingly. 
+
+
+## Minimising the WAIC
+
+### The code
+
+* Nimble model
+```{r eval=TRUE}
+
+WAIC.code <- nimbleCode(
+  {
+    for (t in 1:Total){
+      
+      O[t] ~ dpois(mu[t])    
+      
+      log(mu[t]) <- alpha + inprod(beta[1:6], X[t, 1:6]) + gamma*PM[t] + xi[time_cat[t]] + 
+        beta_tmp[J[t]] * (Temperature[t] - x.change)
+      
+      J[t] <- 1 + step(Temperature[t] - x.change)
+  
+    } 
+    
+   # intrinsic CAR prior on the effect of time
+   xi[1:N] ~ dcar_normal(adj[1:M], weights[1:M], num[1:N], tau.xi, c = 2, zero_mean = 1)
+   
+
+    # Priors:
+    alpha ~ dnorm(0, tau = 0.001)                        
+    alpha_1 <- alpha - beta_tmp[1]*x.change   # the intercept of the first segment
+    alpha_2 <- alpha - beta_tmp[2]*x.change   # the intercept of the second segment
+    
+    for(j in 1:6){
+	    beta[j] ~ dnorm(0, tau = 5)
+    }
+    
+    for (k in 1:2) {
+      beta_tmp[k] ~ dnorm(0, tau = 5)
+    }
+
+    gamma ~ dnorm(0, tau = 5)
+
+    # the priors are informative to help smoothing
+    tau.xi <- 1/sigma2.xi
+    sigma2.xi ~ dgamma(1, 0.5)
+  }
+)
+
+```
+
+
+```{r eval=FALSE, echo=FALSE}
+
+# another parametrization with poor convergence
+
+WAIC.code <- nimbleCode(
+  {
+    for (t in 1:Total){
+      
+      O[t] ~ dpois(mu[t])    
+      
+      log(mu[t]) <- alpha + inprod(beta[1:6], X[t, 1:6]) + gamma*PM[t] + xi[time_cat[t]] + 
+        beta_tmp[1]*Temperature[t] + beta_tmp[2]*step(Temperature[t]-x.change)*(Temperature[t]-x.change)
+  
+    } 
+    
+   # intrinsic CAR prior on the effect of time
+   xi[1:N] ~ dcar_normal(adj[1:M], weights[1:M], num[1:N], tau.xi, c = 2, zero_mean = 1)
+   
+
+    # Priors:
+    alpha ~ dnorm(0, tau = 0.001)                        
+    alpha_2 <- -x.change*(beta_tmp[1] + beta_tmp[2])    # the intercept of the second segment
+    
+    for(j in 1:6){
+	    beta[j] ~ dnorm(0, tau = 5)
+    }
+    
+    for (k in 1:2) {
+      beta_tmp[k] ~ dnorm(0, tau = 5)
+    }
+    
+    beta_tmp_3 <- beta_tmp[1] + beta_tmp[2]
+
+    gamma ~ dnorm(0, tau = 5)
+
+    # the priors are informative to help smoothing
+    tau.xi <- 1/sigma2.xi
+    sigma2.xi ~ dgamma(1, 0.5)
+  }
+)
+
+```
+
+* Define a new data frame without the missing PM$_{10}$.
+```{r}
+
+dat.complete.case <- chicagoNMMAPS[!is.na(chicagoNMMAPS$pm10),]
+dat.complete.case <- dat.complete.case[order(dat.complete.case$time),]
+dat.complete.case$time <- 1:nrow(dat.complete.case)
+
+dat.complete.case$time_cat <- cut(
+  dat.complete.case$time, 
+  breaks = seq(from = min(dat.complete.case$time), 
+               to  = max(dat.complete.case$time), 
+               length.out = 700), # a weekly term
+  labels = 1:699,
+  include.lowest = TRUE
+)
+
+dat.complete.case$time_cat <-
+  as.numeric(droplevels(dat.complete.case$time_cat))
+
+dat.complete.case <- dat.complete.case[order(dat.complete.case$time_cat),]
+
+```
+
+* Define the weights for the covariance matrix of the RW2. 
+```{r}
+
+RW2 <- function(k){
+  
+    rest.comp <- list()
+    for(i in 3:(k-2)){
+      rest.comp[[i]] <- c(i-2, i-1, i+1, i+2)
+    }
+    rest.comp <- unlist(rest.comp)
+    
+    adj = c(2, 3, 1, 3, 4, 
+            rest.comp, 
+            c(k-3, k-2, k, k-2, k-1)
+            )
+    
+    num = c(2, 3, rep(4, times = c(k-4)), 3, 2)
+    
+    weights = c(c(2, -1, 2, 4, -1), 
+                rep(c(-1, 4, 4, -1), times = c(k-4)),
+                c(-1, 4, 2, -1, 2))
+    
+    retlist <- list()
+    retlist$adj <- adj
+    retlist$num <- num
+    retlist$weights <- weights
+    return(retlist)
+    
+}
+
+# time
+N <- max(dat.complete.case$time_cat)
+Wnb <- RW2(N)
+
+```
+
+* Data objects:
+```{r eval=TRUE}
+
+# Format the data for NIMBLE in a list
+ChicagoData = list(
+                 O = dat.complete.case$death, 
+                 X = as.matrix(fastDummies::dummy_cols(dat.complete.case$dow)[,-c(1:2)]), 
+                 PM = scale(dat.complete.case$pm10)[,1], 
+                 Temperature = dat.complete.case$temp
+               
+)
+
+ChicagoConsts <-list(
+                 N = N,  
+                 M = length(Wnb$adj),
+                 
+                 adj = Wnb$adj,                             
+                 num = Wnb$num,
+                 weights = Wnb$weights, 
+                 
+                 time_cat = dat.complete.case$time_cat, 
+                 Total = nrow(dat.complete.case)
+)
+
+  
+```
+
+
+* Initialize the parameters:
+```{r eval=TRUE}
+
+inits <- 
+  list(alpha=rep(0.01, times = 1), 
+       sigma2.xi=0.1,
+       xi=rep(0.1, times = N),
+       beta=rep(0, times = 6), 
+       gamma=0, 
+       beta_tmp=rep(0, times = 2))
+
+```
+
+
+* Set the parameters that will be monitored:
+```{r eval=TRUE}
+params <- c("mu", paste0("beta[", 1:6, "]"), "alpha", "alpha_1", "alpha_2",
+            "gamma", "xi", "sigma2.xi", paste0("beta_tmp[", 1:2, "]"))
+```
+
+* Specify the MCMC setting:
+```{r eval=TRUE}
+# MCMC setting
+ni <- 150000  # nb iterations 
+nt <- 10     # thinning interval
+nb <- 50000   # nb iterations as burn-in 
+nc <- 1      # nb chains
+```
+
+
+```{r eval=FALSE, echo=FALSE}
+
+thresholds <- quantile(dat.complete.case$temp, probs = seq(from = 0.05, to = 0.95, by = 0.05))
+WAIC_vals <- numeric(length(thresholds))
+beta_1 <- list()
+beta_2 <- list()
+
+t_0 <- Sys.time()
+
+for(m in 1:length(thresholds)){
+  
+  print(m)
+  
+  ChicagoConsts$x.change <- as.numeric(thresholds[m])
+  
+  WAIC.model <- nimbleMCMC(code = WAIC.code,
+                           data = ChicagoData,
+                           constants = ChicagoConsts, 
+                           inits = inits,
+                           monitors = params,
+                           niter = ni,
+                           nburnin = nb,
+                           thin = nt, 
+                           nchains = nc, 
+                           setSeed = 9, 
+                           progressBar = TRUE,      
+                           samplesAsCodaMCMC = TRUE, 
+                           summary = TRUE, 
+                           WAIC = TRUE
+  )
+  
+  WAIC_vals[m] <- WAIC.model$WAIC
+  beta_1[[m]] <- WAIC.model$summary["beta_tmp[1]", c("Median", "95%CI_low", "95%CI_upp")]
+  beta_2[[m]] <- WAIC.model$summary["beta_tmp[2]", c("Median", "95%CI_low", "95%CI_upp")]
+  
+}
+
+t_1 <- Sys.time()
+time_WAIC <- t_1 - t_0
+
+dat_WAIC <- data.frame(quant = seq(from = 0.05, to = 0.95, by = 0.05), thresholds = thresholds, WAIC = WAIC_vals)
+```
+
+* Run the MCMC simulations calling Nimble from R using the function `nimbleMCMC()`. If implemented on the parallel environment takes ~1h.
+```{r eval=TRUE, echo=TRUE}
+
+thresholds <- quantile(dat.complete.case$temp, probs = seq(from = 0.05, to = 0.95, by = 0.05))
+
+```
+
+```{r eval=FALSE, echo=TRUE}
+
+parfun <- function(m){
+  
+  ChicagoConsts$x.change <- as.numeric(thresholds[m])
+  
+  WAIC.model <- nimbleMCMC(code = WAIC.code,
+                           data = ChicagoData,
+                           constants = ChicagoConsts, 
+                           inits = inits,
+                           monitors = params,
+                           niter = ni,
+                           nburnin = nb,
+                           thin = nt, 
+                           nchains = nc, 
+                           setSeed = 9, 
+                           progressBar = TRUE,      
+                           samplesAsCodaMCMC = TRUE, 
+                           summary = TRUE, 
+                           WAIC = TRUE
+  )
+  
+  WAIC_vals <- WAIC.model$WAIC
+  beta_1 <- WAIC.model$summary["beta_tmp[1]", c("Median", "95%CI_low", "95%CI_upp")]
+  beta_2 <- WAIC.model$summary["beta_tmp[2]", c("Median", "95%CI_low", "95%CI_upp")]
+  
+  list2ret <- list(WAIC_vals = WAIC_vals, beta_1 = beta_1, beta_2 = beta_2)
+  return(list2ret)
+}
+ 
+ 
+
+# Set up parallel environment
+m <- 1:19
+ncores <- 19
+cl <- makeCluster(ncores, methods=FALSE)
+  
+clusterEvalQ(cl, {
+  library(nimble)
+})
+  
+clusterExport(cl, c("parfun", "thresholds", "WAIC.code", "ChicagoData", "ChicagoConsts", 
+                    "inits", "params", "ni", "nb", "nc", "nt", "m"))
+  
+  
+# For 1 parameter use parSapply
+t_0 <- Sys.time()
+outpar <- parLapply(cl = cl, m, parfun)
+t_1 <- Sys.time() 
+t_1 - t_0
+  
+# close parallel environment
+stopCluster(cl)
+
+```
+
+```{r eval=TRUE, echo = FALSE}
+
+# saveRDS(outpar, file="outpar")
+outpar <- readRDS("outpar")
+
+```
+
+
+* Extract the threshold that minimises the WAIC.
+```{r eval=TRUE, fig.width=5.5, fig.height=3.5}
+
+dat_WAIC <- data.frame(quant = seq(from = 0.05, to = 0.95, by = 0.05), 
+                       thresholds = thresholds, 
+                       WAIC = sapply(outpar, function(X) X$WAIC_vals))
+
+
+dat_WAIC %>%  slice(which.min(WAIC)) -> minWAIC
+ggplot() + geom_point(data = dat_WAIC, aes(x=thresholds, y = WAIC)) + 
+  geom_line(data = dat_WAIC, aes(x=thresholds, y = WAIC)) + ylim(c(38000, 38200)) + xlim(c(-10, 30)) + 
+  theme_bw() + xlab("Temperature") + geom_vline(data = minWAIC, aes(xintercept = thresholds), linetype = "dashed") + 
+  annotate("text", x = 24, y = 38060, label = paste0("Quantile = ", minWAIC$quant)) + 
+  annotate("text", x = 25, y = 38040, label = paste0("Temperature = ", round(minWAIC$thresholds), "oC"))
+
+```
+
+* Extract $\beta_{\text{temp}1}$ and $\beta_{\text{temp}2}$ for the different thresholds. In red dotted line is the threshold that minimises the WAIC. 
+```{r eval=TRUE, fig.width=10, fig.height=4}
+
+# beta_1
+dat_beta1 <- data.frame(quant = seq(from = 0.05, to = 0.95, by = 0.05), 
+                        thresholds = thresholds)
+dat_beta1 <- cbind(dat_beta1, do.call(rbind, lapply(outpar, function(X) X$beta_1)))
+colnames(dat_beta1)[c(4:5)] <- c("low", "up")
+
+ggplot() + 
+  geom_point(data = dat_beta1, aes(x = thresholds, y = Median)) +
+  geom_errorbar(data = dat_beta1, aes(x = thresholds, y = Median, ymin = low, ymax = up), 
+                width = .5, position = "dodge") + ylim(c(-0.004, 0.004)) + xlim(c(-10, 30)) + 
+  xlab("Temperature") + ylab("log beta_1") + theme_bw() + 
+  geom_vline(data = minWAIC, aes(xintercept = thresholds), linetype = "dashed", col = "red") -> p1
+
+
+# beta_2
+dat_beta2 <- data.frame(quant = seq(from = 0.05, to = 0.95, by = 0.05), 
+                        thresholds = thresholds)
+dat_beta2 <- cbind(dat_beta2, do.call(rbind, lapply(outpar, function(X) X$beta_2)))
+colnames(dat_beta2)[c(4:5)] <- c("low", "up")
+
+ggplot() + 
+  geom_point(data = dat_beta2, aes(x = thresholds, y = Median)) +
+  geom_errorbar(data = dat_beta2, aes(x = thresholds, y = Median, ymin = low, ymax = up), 
+                width = .5, position = "dodge") + ylim(c(0, 0.035)) + xlim(c(-10, 30)) + 
+  xlab("Temperature") + ylab("log beta_2") + theme_bw() + 
+  geom_vline(data = minWAIC, aes(xintercept = thresholds), linetype = "dashed", col = "red") -> p2
+
+p1|p2
+
+```
+
+
+* Table of the WAIC, different thresholds and the betas. The difference between the WAICs of the 45th, 60th and 65th percentile is negligible, but strictly speaking the minimum is for the 65th.
+```{r eval=TRUE}
+
+options(scipen = 9999999)
+dat <- cbind(round(dat_WAIC$WAIC), 
+             signif(cbind(dat_WAIC[,-3], dat_beta1[,-c(1,2)], dat_beta2[,-c(1,2)]), 2))
+
+colnames(dat)[1] <- "WAIC"
+dat <- rbind(
+  
+  c("", "", "", "", "beta_1", "", "", "beta_2", ""),
+  colnames(dat), 
+  dat
+  
+)
+
+colnames(dat) <- NULL
+
+knitr::kable(dat) %>% 
+  kable_styling(bootstrap_options = "striped", full_width = F, position = "center")
+
+```
+
+* Rerun the model with the threshold identified
+```{r eval=FALSE}
+
+inits <- list(
+  
+  list(alpha=0.01, 
+       sigma2.xi=0.1,
+       xi=rep(0.1, times = N),
+       beta=rep(0, times = 6), 
+       gamma=0, 
+       beta_tmp=rep(0, times = 2)),
+  
+  list(alpha=1, 
+       sigma2.xi=1,
+       xi=rep(0.5, times = N),
+       beta=rep(-1, times = 6), 
+       gamma=2, 
+       beta_tmp=rep(1, times = 2))
+)
+
+nc <- 2
+
+ChicagoConsts$x.change <- minWAIC$thresholds
+  
+WAIC.model <- nimbleMCMC(code = WAIC.code,
+                           data = ChicagoData,
+                           constants = ChicagoConsts, 
+                           inits = inits,
+                           monitors = params,
+                           niter = ni,
+                           nburnin = nb,
+                           thin = nt, 
+                           nchains = nc, 
+                           setSeed = 9, 
+                           progressBar = TRUE,      
+                           samplesAsCodaMCMC = TRUE, 
+                           summary = TRUE, 
+                           WAIC = TRUE
+  )
+```
+
+```{r eval=TRUE, echo = FALSE}
+
+# saveRDS(WAIC.model, file = "WAIC.model")
+WAIC.model <- readRDS("WAIC.model")
+
+```
+
+### Convergence
+
+* Check convergence
+
+```{r }
+ggs_mod_WAIC <- ggs(WAIC.model$samples)
+```
+
+```{r fig.height=4.5, fig.width=6, eval = FALSE, echo = FALSE}
+
+ggs_mod_WAIC %>% filter(Parameter %in% c("xi[10]", "xi[90]", "xi[55]")) %>% 
+  ggs_traceplot() + theme_bw()
+
+ggs_mod_WAIC %>% filter(Parameter %in% c("sigma2.xi")) %>% 
+  ggs_traceplot() + theme_bw()
+
+ggs_mod_WAIC %>% filter(Parameter %in% c("alpha", "gamma", paste0("beta[", 1:6, "]"))) %>% 
+  ggs_traceplot() + theme_bw()
+```
+
+```{r fig.height=3.5, fig.width=6}
+
+ggs_mod_WAIC %>% filter(Parameter %in% c("alpha_1", "alpha_2")) %>% 
+  ggs_traceplot() + theme_bw()
+
+ggs_mod_WAIC %>% filter(Parameter %in% c(paste0("beta_tmp[", 1:2, "]"))) %>% 
+  ggs_traceplot() + theme_bw()
+
+```
+
+
+## Threshold as random variable
+
+### The code
+
+* Nimble model
+```{r eval=TRUE}
+
+Changepoint.code <- nimbleCode(
+  {
+    for (t in 1:Total){
+      
+      O[t] ~ dpois(mu[t])                               
+      
+      log(mu[t]) <- alpha + inprod(beta[1:6], X[t, 1:6]) + gamma*PM[t] + xi[time_cat[t]] + 
+        beta_tmp[J[t]] * (Temperature[t] - x.change)
+      
+      J[t] <- 1 + step(Temperature[t] - x.change)
+    } 
+    
+    # intrinsic CAR prior on the effect of time
+   xi[1:N] ~ dcar_normal(adj[1:M], weights[1:M], num[1:N], tau.xi, c = 2, zero_mean = 1)
+   
+
+    # Priors:
+    alpha ~ dnorm(0, tau = 0.001)                        
+    alpha_1 <- alpha - beta_tmp[1]*x.change   # the intercept of the first segment
+    alpha_2 <- alpha - beta_tmp[2]*x.change   # the intercept of the second segment
+    
+    for(j in 1:6){
+	    beta[j] ~ dnorm(0, tau = 5)
+    }
+    
+    for (k in 1:2) {
+      beta_tmp[k] ~ dnorm(0, tau = 5)
+    }
+
+    gamma ~ dnorm(0, tau = 5)
+
+    # the priors are informative to help smoothing
+    tau.xi <- 1/sigma2.xi
+    sigma2.xi ~ dgamma(1, 0.5)
+    
+    x.change ~ dunif(-26,33)                 #  tuned based on the max and min
+
+  }
+)
+
+```
+
+
+* Initialize the parameters:
+```{r eval=TRUE}
+
+inits <- list(
+  
+  list(alpha=0.01, 
+       sigma2.xi=0.1,
+       xi=rep(0.1, times = N),
+       beta=rep(0, times = 6), 
+       gamma=0, 
+       x.change=10, 
+       beta_tmp=rep(0, times = 2)),
+  
+  list(alpha=1, 
+       sigma2.xi=1,
+       xi=rep(0.5, times = N),
+       beta=rep(-1, times = 6), 
+       gamma=2, 
+       x.change=20, 
+       beta_tmp=rep(1, times = 2))
+)
+
+```
+
+
+* Set the parameters that will be monitored:
+```{r eval=TRUE}
+params <- c("mu", paste0("beta[", 1:6, "]"), "alpha", "alpha_1","alpha_2",
+            "gamma", "xi", "sigma2.xi", paste0("beta_tmp[", 1:2, "]"), 
+            "x.change")
+```
+
+* Specify the MCMC setting:
+```{r eval=TRUE}
+# MCMC setting
+ni <- 150000  # nb iterations 
+nt <- 10     # thinning interval
+nb <- 50000   # nb iterations as burn-in 
+nc <- 2      # nb chains
+```
+
+* Run the MCMC simulations calling Nimble from R using the function `nimbleMCMC()`. (1.7 hours)
+```{r eval=FALSE}
+
+ChicagoConsts$x.change <- NULL
+
+t_0 <- Sys.time()
+Changepoint.model <- nimbleMCMC(code = Changepoint.code,
+                      data = ChicagoData,
+                      constants = ChicagoConsts, 
+                      inits = inits,
+                      monitors = params,
+                      niter = ni,
+                      nburnin = nb,
+                      thin = nt, 
+                      nchains = nc, 
+                      setSeed = 9, 
+                      progressBar = TRUE,      
+                      samplesAsCodaMCMC = TRUE, 
+                      summary = TRUE, 
+                      WAIC = TRUE
+                      )
+t_1 <- Sys.time()
+time_cp <- t_1 - t_0
+
+```
+
+```{r eval=TRUE, echo = FALSE}
+
+# saveRDS(Changepoint.model, file = "Changepoint.model")
+Changepoint.model <- readRDS("Changepoint.model")
+
+```
+
+### Convergence
+
+* Check convergence
+```{r }
+ggs_mod_cp <- ggs(Changepoint.model$samples)
+```
+
+```{r fig.height=4.5, fig.width=6, eval = FALSE, echo = FALSE}
+
+ggs_mod_cp %>% filter(Parameter %in% c("xi[10]", "xi[90]", "xi[55]")) %>% 
+  ggs_traceplot() + theme_bw()
+
+ggs_mod_cp %>% filter(Parameter %in% c("sigma2.xi")) %>% 
+  ggs_traceplot() + theme_bw()
+
+ggs_mod_cp %>% filter(Parameter %in% c("alpha", "gamma", paste0("beta[", 1:6, "]"))) %>% 
+  ggs_traceplot() + theme_bw()
+```
+
+```{r fig.height=3.5, fig.width=6}
+
+ggs_mod_cp %>% filter(Parameter %in% c( "alpha_1", "alpha_2")) %>% 
+  ggs_traceplot() + theme_bw()
+
+ggs_mod_cp %>% filter(Parameter %in% c(paste0("beta_tmp[", 1:2, "]"))) %>% 
+  ggs_traceplot() + theme_bw()
+
+```
+
+```{r fig.height=2.5, fig.width=6}
+ggs_mod_cp %>% filter(Parameter %in% c("x.change")) %>% 
+  ggs_traceplot() + theme_bw()
+```
+
+```{r eval=TRUE, echo = FALSE}
+
+RW2.model <- readRDS("CompleteCase.model")
+
+```
+
+## Comparison of Results
+
+The model with threshold as a random variable picks up a higher threshold (see histogram below) compared to the one picked up by the WAIC procedure (red dashed line below). I should also note that I rerun the analysis for the changepoint model with different initial values for the x.change, namely 0 and -10, and the results are identical. 
+
+```{r eval=TRUE, fig.height=4, fig.width=5.5}
+
+ggs_mod_cp %>% filter(Parameter %in% c("x.change")) %>% 
+  ggs_histogram() + theme_bw() + geom_vline(data = minWAIC, aes(xintercept = thresholds), 
+                                            linetype = "dashed", col = "red") + xlim(c(0,30))
+
+```
+
+* Table of results. The results based on the different approaches are a bit different, of course due to the different change points selected. 
+
+```{r eval=TRUE, fig.height=4.5, fig.width=6}
+
+
+Coef95CrI <- function(mod){
+  
+  a_1 <- signif(quantile(mod$samples$chain2[,"alpha_1"], probs = c(0.5, 0.025, 0.975)), digits = 4)
+  a_2 <- signif(quantile(mod$samples$chain2[,"alpha_2"], probs = c(0.5, 0.025, 0.975)), digits = 4)
+  
+  a.bind <- 
+    rbind(
+      cbind(
+        paste0(a_1[1]),
+        paste0("(", a_1[2], ", " , a_1[3], ")")
+      ), 
+      cbind(
+        paste0(a_2[1]),
+        paste0("(", a_2[2], ", " , a_2[3], ")")
+      )
+    )
+  
+  b_1 <- signif(quantile(mod$samples$chain2[,"beta_tmp[1]"], 
+                         probs = c(0.5, 0.025, 0.975))*100, digits = 2)
+  b_2 <- signif(quantile(mod$samples$chain2[,"beta_tmp[2]"], 
+                         probs = c(0.5, 0.025, 0.975))*100, digits = 2)
+  
+  b.bind <- 
+    rbind(
+    cbind(
+      paste0(b_1[1], "%"),
+      paste0("(", b_1[2], "%", ", " , b_1[3], "%)")
+    ), 
+    cbind(
+      paste0(b_2[1], "%"),
+      paste0("(", b_2[2], "%", ", " , b_1[3], "%)")
+    )
+  )
+
+  dat <- data.frame(rbind(a.bind, b.bind))
+  rownames(dat) <- c("alpha_1", "alpha_2", "beta_1*100", "beta_2*100")
+  colnames(dat) <- c("Median", "CrI95%")
+  return(dat)
+  
+}
+
+
+tab <- cbind(Coef95CrI(WAIC.model), Coef95CrI(Changepoint.model))
+tab <- rbind(
+  
+  c("WAIC", "", "Changepoint", ""),
+  colnames(tab),
+  tab
+  
+)
+
+colnames(tab) <- NULL
+rownames(tab)[c(1,2)] <- c("", " ")
+knitr::kable(tab) %>% 
+  kable_styling(bootstrap_options = "striped", 
+                full_width = F, position = "center")
+
+
+```
+
+
+* Plot a RW2 for the temperature (see [this tutorial](https://gkonstantinoudis.github.io/nimble/Missings.html)) and the 2 different threshold approaches. It seems that the changepoint model captures better the extremes observed in the higher temperatures, whereas the WAIC approach is defined in a way so there is a better representation of the effect of smaller temperatures. 
+```{r fig.height=4, fig.width=6}
+
+tmp_cat = cut(
+  dat.complete.case$temp, 
+  breaks = seq(from = min(dat.complete.case$temp), 
+               to  = max(dat.complete.case$temp), 
+               length.out = 100),
+  labels = seq(from = min(dat.complete.case$temp), 
+               to  = max(dat.complete.case$temp), 
+               length.out = 100)[-1],
+  include.lowest = TRUE
+)
+
+tmp_cat <- droplevels(tmp_cat)
+tmp_cat <- 
+round(as.numeric(as.character(levels(tmp_cat))), digits = 3)
+K <- length(tmp_cat)
+
+
+datRW2 = data.frame(temp = tmp_cat, 
+                 median = RW2.model$summary$all.chains[paste0("w[", 1:K, "]"), "Median"] + 
+                   RW2.model$summary$all.chains["alpha","Median"],
+                 LL = RW2.model$summary$all.chains[paste0("w[", 1:K, "]"), "95%CI_low"] + 
+                   RW2.model$summary$all.chains["alpha","Median"], 
+                 UL = RW2.model$summary$all.chains[paste0("w[", 1:K, "]"), "95%CI_upp"] + 
+                  RW2.model$summary$all.chains["alpha","Median"])
+
+
+
+# function to get the lines to plot them
+
+
+PlotLinearSegm <- function(mod, thr){
+  
+  a <- median(mod$samples$chain2[,"alpha"])
+  b_1 <- median(mod$samples$chain2[,"beta_tmp[1]"])
+  b_2 <- median(mod$samples$chain2[,"beta_tmp[2]"])
+  
+  a_1 <- median(mod$samples$chain2[,"alpha_1"])
+  a_2 <- median(mod$samples$chain2[,"alpha_2"])
+  
+  x_1 <- seq(from=min(tmp_cat), to=thr, length.out = 20)
+  x_2 <- seq(from=thr, to=max(tmp_cat), length.out = 20)
+  
+  return(data.frame(xvalues = c(x_1, x_2), beta = c(c(a_1 + b_1*x_1), c(a_2 + b_2*x_2))))
+  
+}
+
+
+# WAIC model
+
+dat.WAIC.plot <- PlotLinearSegm(mod=WAIC.model, thr=minWAIC$thresholds)
+dat.WAIC.plot$model <- "WAIC"
+
+# CP model
+
+dat.cp.plot <- PlotLinearSegm(mod=Changepoint.model, 
+                              thr=median(Changepoint.model$samples$chain2[,paste0("x.change")]))
+
+dat.cp.plot$model <- "CP"
+
+dat.mod.plot <- rbind(dat.WAIC.plot, dat.cp.plot)
+
+
+ggplot() + geom_line(data = datRW2, aes(x = temp, y = median), size = 1) + 
+  geom_line(data = datRW2, aes(x = temp, y = LL), linetype = 2) + 
+  geom_line(data = datRW2, aes(x = temp, y = UL), linetype = 2) + 
+  theme_bw() + xlab("Temperature") + ylab("log Number of deaths") + xlim(c(-30, 35)) + 
+  geom_line(data = dat.mod.plot, aes(x = xvalues, y = beta, col = model), linetype = 1, size = 1) 
+
+```
+
+
+## Conclusion
+
+In this tutorial, I show how to fit linear threshold models using NIMBLE. The two approaches produce similar results, nevertheless using a random variable for the threshold is a more flexible and natural approach. The Bayesian framework naturally provides a scheme to propagate any prior knowledge about this threshold, for instance when we are interested in higher temperatures. Of notice is that the parametrisation used influences convergence and the results. We used a RW2 based approach as the truth and we showed that even in such extreme cases a linear threshold model with one threshold would suffice. Of course, splines or RW2 are more flexible, but certain reasons such as: a) when the interest lies in higher temperatures, b) more intuitive communication of the results (say by 1oC increase in temperature) and c) when such a threshold is of interest, call for the use of these models. I should also note that it is common for such analyses to implement spatially varying coefficients which could account for steep increases in the higher quantiles, implying that a line would be enough. Finally, the flexibility of such models can be increased by adding more thresholds, but if you aim at flexibility splines and RW2 are better alternatives. 
+
+
+## References
