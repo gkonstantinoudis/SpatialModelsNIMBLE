@@ -240,7 +240,7 @@ We will fit a Poisson log-linear model in the Bayesian framework to quantify the
 \hbox{O}_i & \sim \hbox{Poisson}(E_i \lambda_i); \;\;\; i=1,...,N\\
 \log \lambda_i & = \alpha + \beta_1 X_{1i} + \beta_2 X_{2i} + \sum_{j=2}^5\beta_{3j} X_{3ji} + b_{i}  \\
 b_{i} & = \frac{1}{\tau_b}\big(\theta\sqrt{1-\rho} + \phi\sqrt{\rho}\big)\\
-\theta_{i} & \sim N(0,1/\tau_{\theta}) \\
+\theta_{i} & \sim N(0,1) \\
 \phi_{i} & \sim \text{ICAR}({\bf W^*}, 1)\\
 \end{aligned}
 \end{equation}
@@ -265,7 +265,7 @@ BYMecoCode <- nimbleCode(
     b[i] <- (1/sqrt(tau.b))*(sqrt((1-rho))*theta[i] + 
                                sqrt(rho/scale)*phi[i])
     
-    theta[i] ~ dnorm(0, tau = tau.theta)                      # area-specific RE
+    theta[i] ~ dnorm(0, tau = 1)                              # area-specific RE
     SMR[i] <- exp(b[1] + b[i])                                # area-specific SIR
     resSMR[i] <- exp(b[i])                                    # area-specific residual SIR
     e[i] <- (O[i]-mu[i])/sqrt(mu[i])                          # residuals  
